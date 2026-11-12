@@ -1,0 +1,80 @@
+# 倾梦GPT绘画企业级百万号池系统 · Docker Compose 生产部署（精简版）
+#
+# 使用：
+#   1) 准备镜像：本机已有镜像，或保留下面的 build 段首次构建
+#      docker load -i qingmeng-1.9.9.tar.gz
+#   2) 准备数据目录（必须属主 10001，否则容器无法写库）：
+#      mkdir -p data && chown -R 10001:10001 data
+#   3) 启动：
+#      docker compose -f docker-compose.qingmeng.yml up -d
+#   4) 访问：http://服务器IP:3100
+#
+# 说明：
+# * 不再挂载 config.json：认证密钥走 .env，业务设置全部存 /data 数据库；
+# * 不再挂载旧库目录：要用旧数据时，在网页「设置 → 旧项目目录同步 → 从数据库文件导入」上传；
+# * 默认单机 SQLite（WAL），百万号池可后续切换 PostgreSQL（见文末注释）。
+
+services:
+  app:
+    image: ${QINGMENG_IMAGE:-qingmeng/qingmeng-gpt:1.9.9}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+    container_name: qingmeng-gpt
+    restart: unless-stopped
+    stop_grace_period: 30s
+    ports:
+      - "${QINGMENG_PORT:-3100}:80"
+    volumes:
+      - ./data:/data
+    environment:
+      QINGMENG_AUTH_KEY: ${QINGMENG_AUTH_KEY:?请在 .env 中设置 QINGMENG_AUTH_KEY}
+      QINGMENG_DATA_DIR: /data
+      QINGMENG_BASE_URL: ${QINGMENG_BASE_URL:-}
+      DATABASE_URL: ${DATABASE_URL:-}
+      TZ: ${TZ:-Asia/Shanghai}
+      # 全新部署关闭自动迁移；旧库数据用网页上传导入即可
+      QINGMENG_AUTO_MIGRATE: "0"
+    dns:
+      - 223.5.5.5
+      - 1.1.1.1
+    dns_opt:
+      - timeout:2
+      - attempts:3
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:80/version >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+
+# 百万号池 / 多实例时再启用 PostgreSQL（把 .env 的 DATABASE_URL 指过去即可）：
+#
+#  postgres:
+#    image: postgres:16-alpine
+#    container_name: qingmeng-postgres
+#    restart: unless-stopped
+#    environment:
+#      POSTGRES_USER: ${POSTGRES_USER:-qingmeng}
+#      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-qingmeng}
+#      POSTGRES_DB: ${POSTGRES_DB:-qingmeng}
+#    volumes:
+#      - ./pgdata:/var/lib/postgresql/data
+#    shm_size: 256mb
+#    healthcheck:
+#      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-qingmeng}"]
+#      interval: 10s
+#      timeout: 5s
+#      retries: 10
