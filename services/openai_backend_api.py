@@ -3069,7 +3069,10 @@ class OpenAIBackendAPI:
 
         # Fast path: delegate polling to the Go upstream-gateway goroutine,
         # freeing the Python thread during the poll wait.  Falls through to
-        # the Python poll path on any failure.
+        # the Python poll path only when the gateway is unavailable or returns
+        # quickly (indicating a transient error).  If Go consumed the full
+        # budget and timed out, raise ImagePollTimeoutError immediately —
+        # there is no point in starting a Python poll with zero remaining time.
         if _ugw.is_enabled() and not (initial_file_ids or initial_sediment_ids):
             conv_url = f"{self.base_url}/backend-api/conversation/{conversation_id}"
             poll_headers = {
@@ -3101,6 +3104,16 @@ class OpenAIBackendAPI:
                     })
                     self._add_image_result_timing("poll_wait_ms", gw_result.get("elapsed_ms") or 0)
                     return gw_file_ids, gw_sed_ids
+            # gw_result is None: gateway timed out or was unavailable.
+            # If the gateway consumed most of the budget (< 10 s left), there
+            # is no point starting a Python poll — raise timeout directly.
+            elapsed = time.monotonic() - started_at
+            if elapsed >= timeout_secs - 10.0:
+                self._add_image_result_timing("poll_wait_ms", int(elapsed * 1000))
+                raise ImagePollTimeoutError(
+                    "Image generation timed out. Please try again."
+                )
+            # Gateway was down / returned fast → fall through to Python poll.
 
         attempt = 0
         miss_streak = 0
