@@ -1,0 +1,625 @@
+@import url("https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;600;700&family=Noto+Serif+SC:wght@600;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html[data-theme="dark"] {
+    --background: 0 0% 6%;
+    --foreground: 0 0% 96%;
+
+    --card: 0 0% 10%;
+    --card-foreground: 0 0% 96%;
+
+    --primary: 0 0% 96%;
+    --primary-foreground: 0 0% 8%;
+
+    --secondary: 0 0% 16%;
+    --secondary-foreground: 0 0% 96%;
+
+    --muted: 0 0% 18%;
+    --muted-foreground: 0 0% 72%;
+
+    --accent: 0 0% 20%;
+    --accent-foreground: 0 0% 96%;
+
+    --destructive: 0 0% 72%;
+    --destructive-foreground: 0 0% 8%;
+
+    --border: 0 0% 27%;
+    --input: 0 0% 27%;
+    --ring: 0 0% 96%;
+
+    --tone-success-border: 160 50% 35%;
+    --tone-success-bg: 160 35% 12%;
+    --tone-success-foreground: 151 70% 82%;
+    --tone-success-strong: 160 75% 62%;
+
+    --tone-warning-border: 43 65% 38%;
+    --tone-warning-bg: 38 35% 14%;
+    --tone-warning-foreground: 48 96% 82%;
+    --tone-warning-strong: 43 96% 64%;
+
+    --tone-error-border: 346 55% 38%;
+    --tone-error-bg: 346 32% 15%;
+    --tone-error-foreground: 351 95% 83%;
+    --tone-error-strong: 351 89% 66%;
+
+    --tone-info-border: 196 55% 38%;
+    --tone-info-bg: 198 35% 15%;
+    --tone-info-foreground: 199 95% 82%;
+    --tone-info-strong: 198 90% 65%;
+
+    --shadow-elevated: 0 10px 28px rgba(0, 0, 0, 0.38);
+    --shadow-floating: 0 14px 32px rgba(0, 0, 0, 0.46);
+    --shadow-toast: 0 12px 30px rgba(0, 0, 0, 0.36), 0 3px 10px rgba(0, 0, 0, 0.28);
+    --overlay-backdrop: rgba(0, 0, 0, 0.68);
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: "Noto Sans SC", "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    margin: 0;
+    padding: 0;
+    overflow-x: hidden;
+    background-image:
+      radial-gradient(900px circle at 10% -20%, rgba(0, 0, 0, 0.04), transparent 45%),
+      radial-gradient(700px circle at 90% 0%, rgba(0, 0, 0, 0.05), transparent 40%),
+      linear-gradient(180deg, hsl(var(--background)) 0%, hsl(var(--background)) 100%);
+  }
+
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image: linear-gradient(120deg, rgba(255, 255, 255, 0.55), rgba(255, 255, 255, 0));
+    opacity: 0.5;
+    pointer-events: none;
+    z-index: -1;
+  }
+
+  h1,
+  h2,
+  h3 {
+    font-family: "Noto Serif SC", "Georgia", serif;
+    letter-spacing: -0.01em;
+  }
+
+  #app {
+    min-height: 100vh;
+  }
+
+  html[data-theme="dark"] body {
+    background-image:
+      radial-gradient(900px circle at 10% -20%, rgba(255, 255, 255, 0.06), transparent 45%),
+      radial-gradient(700px circle at 90% 0%, rgba(255, 255, 255, 0.05), transparent 40%),
+      linear-gradient(180deg, hsl(var(--background)) 0%, hsl(var(--background)) 100%);
+  }
+
+  html[data-theme="dark"] body::before {
+    background-image: linear-gradient(120deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0));
+    opacity: 1;
+  }
+
+  button:disabled,
+  input:disabled,
+  textarea:disabled,
+  select:disabled,
+  option:disabled,
+  fieldset:disabled,
+  [aria-disabled="true"],
+  [data-disabled],
+  label:has(input:disabled),
+  label:has(textarea:disabled),
+  label:has(select:disabled) {
+    cursor: not-allowed;
+  }
+
+  button:disabled *,
+  fieldset:disabled *,
+  [aria-disabled="true"] *,
+  [data-disabled] * {
+    cursor: not-allowed;
+  }
+}
+
+html {
+  font-size: 15px;
+}
+
+html,
+body {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.35) transparent;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.35) transparent;
+}
+
+html::-webkit-scrollbar,
+body::-webkit-scrollbar,
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+html::-webkit-scrollbar-track,
+body::-webkit-scrollbar-track,
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+html::-webkit-scrollbar-thumb,
+body::-webkit-scrollbar-thumb,
+*::-webkit-scrollbar-thumb {
+  background-color: rgba(0, 0, 0, 0.35);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+.scrollbar-slim {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.35) transparent;
+}
+
+.scrollbar-slim::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.scrollbar-slim::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.scrollbar-slim::-webkit-scrollbar-thumb {
+  background-color: rgba(0, 0, 0, 0.35);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+.cv-auto {
+  content-visibility: auto;
+  contain-intrinsic-size: 0 44px;
+}
+
+.account-status-detail-card .ui-status-body {
+  white-space: pre-line;
+  line-height: 1.6;
+}
+
+input::placeholder,
+textarea::placeholder,
+input.font-mono::placeholder,
+textarea.font-mono::placeholder,
+input.ui-input-sm::placeholder,
+input.ui-input-md::placeholder,
+textarea.ui-textarea-sm::placeholder {
+  color: hsl(var(--muted-foreground) / 0.62);
+  font-family: "Noto Sans SC", "Helvetica Neue", Arial, sans-serif;
+  font-size: inherit;
+  font-weight: 400;
+  letter-spacing: 0;
+  opacity: 1;
+}
+
+.ui-select-trigger {
+  display: inline-flex;
+  width: auto;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  color: hsl(var(--foreground));
+}
+
+.ui-select-trigger:hover:not(:disabled),
+.ui-select-trigger[aria-expanded="true"] {
+  border-color: hsl(var(--primary));
+}
+
+.ui-select-trigger > svg {
+  flex: 0 0 auto;
+}
+
+/* ---------------------------------------------------------------------------
+ * 倾梦GPT · 五套主题皮肤（palette）
+ *
+ * 每套 palette 不只是换色：配色体系、圆角尺度、字体搭配、密度、描边与投影
+ * 各自独立。html[data-palette] 由 lib/theme.ts 写入，默认主题保持原样。
+ * ------------------------------------------------------------------------- */
+
+:root {
+  --font-heading: "Noto Serif SC", "Georgia", serif;
+  --font-body: "Noto Sans SC", "Helvetica Neue", Arial, sans-serif;
+  --shell-shadow: var(--shadow-elevated, 0 10px 28px rgba(0, 0, 0, 0.12));
+  --shell-nav-accent: transparent;
+}
+
+.shell-sidebar-brand-subtitle {
+  margin-top: 0.1rem;
+  font-family: var(--font-body);
+  font-size: 0.62rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: hsl(var(--muted-foreground) / 0.75);
+}
+
+/* 1 · 青瓷：水墨留白，玉青主色，左描边导航 */
+html[data-palette="jade"] {
+  --background: 150 18% 96%;
+  --foreground: 165 18% 12%;
+  --card: 0 0% 100%;
+  --card-foreground: 165 18% 12%;
+  --primary: 158 62% 27%;
+  --primary-foreground: 150 40% 98%;
+  --secondary: 150 18% 92%;
+  --secondary-foreground: 165 18% 16%;
+  --muted: 150 14% 93%;
+  --muted-foreground: 160 8% 38%;
+  --accent: 150 22% 89%;
+  --accent-foreground: 165 18% 14%;
+  --destructive: 355 62% 44%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 150 14% 84%;
+  --input: 150 14% 84%;
+  --ring: 158 62% 30%;
+  --tone-success-border: 158 45% 62%;
+  --tone-success-bg: 150 45% 93%;
+  --tone-success-foreground: 158 62% 22%;
+  --tone-success-strong: 158 62% 30%;
+  --tone-warning-border: 38 65% 68%;
+  --tone-warning-bg: 40 80% 94%;
+  --tone-warning-foreground: 34 70% 26%;
+  --tone-warning-strong: 34 78% 40%;
+  --tone-error-border: 352 45% 70%;
+  --tone-error-bg: 352 60% 95%;
+  --tone-error-foreground: 352 60% 32%;
+  --tone-error-strong: 352 62% 42%;
+  --tone-info-border: 200 45% 68%;
+  --tone-info-bg: 200 55% 94%;
+  --tone-info-foreground: 202 70% 26%;
+  --tone-info-strong: 202 70% 36%;
+  --shadow-elevated: 0 10px 30px rgba(15, 90, 62, 0.10);
+  --shadow-floating: 0 16px 38px rgba(15, 90, 62, 0.14);
+  --font-heading: "Noto Serif SC", "Songti SC", serif;
+  --font-body: "Noto Sans SC", "PingFang SC", sans-serif;
+}
+
+html[data-theme="dark"][data-palette="jade"] {
+  --background: 162 14% 7%;
+  --foreground: 150 12% 94%;
+  --card: 162 12% 10%;
+  --card-foreground: 150 12% 94%;
+  --primary: 158 52% 58%;
+  --primary-foreground: 162 30% 8%;
+  --secondary: 162 12% 16%;
+  --secondary-foreground: 150 12% 92%;
+  --muted: 162 10% 17%;
+  --muted-foreground: 150 8% 70%;
+  --accent: 158 18% 22%;
+  --accent-foreground: 150 12% 94%;
+  --destructive: 352 55% 60%;
+  --destructive-foreground: 162 20% 8%;
+  --border: 162 10% 23%;
+  --input: 162 10% 23%;
+  --ring: 158 52% 58%;
+  --tone-success-border: 158 32% 34%;
+  --tone-success-bg: 158 30% 14%;
+  --tone-success-foreground: 150 55% 82%;
+  --tone-success-strong: 158 52% 60%;
+  --tone-warning-border: 38 40% 34%;
+  --tone-warning-bg: 38 32% 14%;
+  --tone-warning-foreground: 42 70% 80%;
+  --tone-warning-strong: 42 70% 58%;
+  --tone-error-border: 352 34% 36%;
+  --tone-error-bg: 352 30% 15%;
+  --tone-error-foreground: 352 70% 84%;
+  --tone-error-strong: 352 62% 62%;
+  --tone-info-border: 200 30% 34%;
+  --tone-info-bg: 200 28% 14%;
+  --tone-info-foreground: 200 60% 82%;
+  --tone-info-strong: 200 60% 60%;
+  --shadow-elevated: 0 10px 30px rgba(0, 0, 0, 0.45);
+  --shadow-floating: 0 16px 38px rgba(0, 0, 0, 0.55);
+}
+
+html[data-palette="jade"] body {
+  background-image:
+    radial-gradient(720px circle at 0% 0%, rgba(15, 122, 90, 0.07), transparent 55%),
+    linear-gradient(180deg, hsl(var(--background)) 0%, hsl(var(--background)) 100%);
+}
+
+html[data-palette="jade"] .shell-sidebar {
+  border-right-width: 1px;
+  border-right-color: hsl(var(--border) / 0.9);
+  background-image: linear-gradient(180deg, hsl(var(--card)) 0%, hsl(150 20% 99%) 100%);
+}
+
+html[data-palette="jade"][data-theme="dark"] .shell-sidebar {
+  background-image: linear-gradient(180deg, hsl(var(--card)) 0%, hsl(162 14% 8%) 100%);
+}
+
+html[data-palette="jade"] .shell-nav-item {
+  border-radius: 0.375rem;
+  border-left-width: 2px;
+  border-left-color: transparent;
+}
+
+html[data-palette="jade"] .shell-nav-item[aria-current="page"] {
+  border-left-color: hsl(var(--primary));
+  background: hsl(var(--primary) / 0.08);
+}
+
+html[data-palette="jade"] :where(.rounded-lg) { border-radius: 0.375rem; }
+html[data-palette="jade"] :where(.rounded-xl) { border-radius: 0.5rem; }
+html[data-palette="jade"] :where(.rounded-2xl) { border-radius: 0.625rem; }
+html[data-palette="jade"] :where(.rounded-3xl) { border-radius: 0.75rem; }
+
+/* 2 · 星夜：深空霓虹，直角面板，发光描边 */
+html[data-palette="aurora"] {
+  --background: 224 44% 6%;
+  --foreground: 210 30% 96%;
+  --card: 224 38% 9%;
+  --card-foreground: 210 30% 96%;
+  --primary: 190 92% 56%;
+  --primary-foreground: 224 55% 7%;
+  --secondary: 224 32% 15%;
+  --secondary-foreground: 210 30% 94%;
+  --muted: 224 28% 17%;
+  --muted-foreground: 215 18% 72%;
+  --accent: 268 62% 58%;
+  --accent-foreground: 210 30% 96%;
+  --destructive: 345 78% 60%;
+  --destructive-foreground: 224 45% 7%;
+  --border: 220 32% 22%;
+  --input: 220 32% 22%;
+  --ring: 190 92% 58%;
+  --tone-success-border: 160 45% 34%;
+  --tone-success-bg: 160 40% 12%;
+  --tone-success-foreground: 155 80% 80%;
+  --tone-success-strong: 158 80% 60%;
+  --tone-warning-border: 40 55% 36%;
+  --tone-warning-bg: 38 45% 12%;
+  --tone-warning-foreground: 45 95% 78%;
+  --tone-warning-strong: 45 95% 60%;
+  --tone-error-border: 345 50% 38%;
+  --tone-error-bg: 345 45% 14%;
+  --tone-error-foreground: 345 95% 84%;
+  --tone-error-strong: 345 90% 66%;
+  --tone-info-border: 190 55% 36%;
+  --tone-info-bg: 190 45% 13%;
+  --tone-info-foreground: 190 95% 82%;
+  --tone-info-strong: 190 95% 62%;
+  --shadow-elevated: 0 12px 34px rgba(6, 10, 24, 0.72), 0 0 0 1px hsl(190 92% 56% / 0.08);
+  --shadow-floating: 0 18px 46px rgba(6, 10, 24, 0.8), 0 0 0 1px hsl(190 92% 56% / 0.12);
+  --font-heading: "Inter", "Noto Sans SC", system-ui, sans-serif;
+  --font-body: "Inter", "Noto Sans SC", system-ui, sans-serif;
+}
+
+html[data-palette="aurora"] body {
+  background-image:
+    radial-gradient(900px circle at 15% -10%, rgba(56, 214, 255, 0.12), transparent 50%),
+    radial-gradient(700px circle at 90% 0%, rgba(168, 85, 247, 0.12), transparent 45%),
+    linear-gradient(180deg, hsl(var(--background)) 0%, hsl(224 44% 5%) 100%);
+}
+
+html[data-palette="aurora"] .shell-header {
+  border-bottom-color: hsl(190 92% 56% / 0.22);
+  background-image: linear-gradient(90deg, hsl(190 92% 56% / 0.06), transparent 45%);
+}
+
+html[data-palette="aurora"] .shell-sidebar {
+  border-right-color: hsl(190 92% 56% / 0.16);
+  background-image: linear-gradient(180deg, hsl(224 40% 8%) 0%, hsl(224 44% 6%) 100%);
+}
+
+html[data-palette="aurora"] .shell-sidebar-section-label {
+  color: hsl(var(--primary) / 0.75);
+}
+
+html[data-palette="aurora"] :where(.rounded-sm, .rounded, .rounded-md, .rounded-lg) { border-radius: 0.125rem; }
+html[data-palette="aurora"] :where(.rounded-xl, .rounded-2xl) { border-radius: 0.25rem; }
+html[data-palette="aurora"] :where(.rounded-3xl) { border-radius: 0.375rem; }
+
+/* 3 · 樱语：奶油粉调，超圆角，柔和投影 */
+html[data-palette="sakura"] {
+  --background: 12 55% 98%;
+  --foreground: 340 20% 18%;
+  --card: 0 0% 100%;
+  --card-foreground: 340 20% 18%;
+  --primary: 340 58% 46%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 345 45% 95%;
+  --secondary-foreground: 340 20% 22%;
+  --muted: 345 30% 96%;
+  --muted-foreground: 340 10% 44%;
+  --accent: 345 52% 93%;
+  --accent-foreground: 340 20% 22%;
+  --destructive: 356 60% 48%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 340 28% 91%;
+  --input: 340 28% 91%;
+  --ring: 340 58% 52%;
+  --tone-success-border: 158 40% 72%;
+  --tone-success-bg: 158 45% 95%;
+  --tone-success-foreground: 158 55% 26%;
+  --tone-success-strong: 158 55% 36%;
+  --tone-warning-border: 35 70% 74%;
+  --tone-warning-bg: 40 85% 95%;
+  --tone-warning-foreground: 28 70% 30%;
+  --tone-warning-strong: 28 76% 44%;
+  --tone-error-border: 352 48% 76%;
+  --tone-error-bg: 352 65% 96%;
+  --tone-error-foreground: 352 58% 36%;
+  --tone-error-strong: 352 60% 46%;
+  --tone-info-border: 210 45% 76%;
+  --tone-info-bg: 210 60% 96%;
+  --tone-info-foreground: 210 62% 32%;
+  --tone-info-strong: 210 62% 42%;
+  --shadow-elevated: 0 14px 34px rgba(194, 85, 122, 0.12);
+  --shadow-floating: 0 20px 44px rgba(194, 85, 122, 0.16);
+  --font-heading: "Noto Serif SC", "Songti SC", serif;
+  --font-body: "Noto Sans SC", "PingFang SC", sans-serif;
+}
+
+html[data-theme="dark"][data-palette="sakura"] {
+  --background: 340 16% 9%;
+  --foreground: 340 18% 95%;
+  --card: 340 15% 12%;
+  --card-foreground: 340 18% 95%;
+  --primary: 340 62% 70%;
+  --primary-foreground: 340 25% 10%;
+  --secondary: 340 14% 18%;
+  --secondary-foreground: 340 18% 94%;
+  --muted: 340 12% 19%;
+  --muted-foreground: 340 10% 72%;
+  --accent: 340 20% 24%;
+  --accent-foreground: 340 18% 95%;
+  --destructive: 352 60% 62%;
+  --destructive-foreground: 340 20% 10%;
+  --border: 340 12% 25%;
+  --input: 340 12% 25%;
+  --ring: 340 62% 70%;
+  --tone-success-border: 158 26% 34%;
+  --tone-success-bg: 158 26% 15%;
+  --tone-success-foreground: 158 55% 82%;
+  --tone-success-strong: 158 55% 62%;
+  --tone-warning-border: 35 32% 34%;
+  --tone-warning-bg: 35 28% 14%;
+  --tone-warning-foreground: 40 75% 80%;
+  --tone-warning-strong: 40 75% 58%;
+  --tone-error-border: 352 30% 36%;
+  --tone-error-bg: 352 26% 15%;
+  --tone-error-foreground: 352 70% 84%;
+  --tone-error-strong: 352 62% 64%;
+  --tone-info-border: 210 26% 34%;
+  --tone-info-bg: 210 24% 14%;
+  --tone-info-foreground: 210 62% 84%;
+  --tone-info-strong: 210 62% 64%;
+  --shadow-elevated: 0 14px 34px rgba(0, 0, 0, 0.46);
+  --shadow-floating: 0 20px 44px rgba(0, 0, 0, 0.56);
+}
+
+html[data-palette="sakura"] {
+  font-size: 15.5px;
+}
+
+html[data-palette="sakura"] body {
+  background-image:
+    radial-gradient(760px circle at 100% 0%, rgba(194, 85, 122, 0.10), transparent 52%),
+    radial-gradient(620px circle at 0% 100%, rgba(255, 183, 197, 0.16), transparent 48%),
+    linear-gradient(180deg, hsl(var(--background)) 0%, hsl(var(--background)) 100%);
+}
+
+html[data-palette="sakura"] .shell-nav-item {
+  border-radius: 999px;
+}
+
+html[data-palette="sakura"] .shell-nav-icon {
+  border-radius: 999px;
+}
+
+html[data-palette="sakura"] :where(.rounded-lg) { border-radius: 0.9rem; }
+html[data-palette="sakura"] :where(.rounded-xl) { border-radius: 1.15rem; }
+html[data-palette="sakura"] :where(.rounded-2xl) { border-radius: 1.4rem; }
+html[data-palette="sakura"] :where(.rounded-3xl) { border-radius: 1.75rem; }
+
+/* 4 · 曜石：石墨黑金，零圆角，紧凑等宽 */
+html[data-palette="obsidian"] {
+  --background: 240 4% 6%;
+  --foreground: 40 12% 94%;
+  --card: 240 4% 9%;
+  --card-foreground: 40 12% 94%;
+  --primary: 40 62% 56%;
+  --primary-foreground: 240 6% 7%;
+  --secondary: 240 3% 15%;
+  --secondary-foreground: 40 12% 92%;
+  --muted: 240 3% 16%;
+  --muted-foreground: 40 6% 66%;
+  --accent: 40 22% 22%;
+  --accent-foreground: 40 12% 94%;
+  --destructive: 356 62% 56%;
+  --destructive-foreground: 240 6% 8%;
+  --border: 240 4% 21%;
+  --input: 240 4% 21%;
+  --ring: 40 62% 56%;
+  --tone-success-border: 158 26% 32%;
+  --tone-success-bg: 158 24% 12%;
+  --tone-success-foreground: 158 50% 80%;
+  --tone-success-strong: 158 50% 58%;
+  --tone-warning-border: 40 34% 32%;
+  --tone-warning-bg: 40 30% 12%;
+  --tone-warning-foreground: 44 80% 78%;
+  --tone-warning-strong: 44 80% 56%;
+  --tone-error-border: 356 30% 34%;
+  --tone-error-bg: 356 26% 13%;
+  --tone-error-foreground: 356 72% 82%;
+  --tone-error-strong: 356 64% 60%;
+  --tone-info-border: 200 24% 32%;
+  --tone-info-bg: 200 22% 12%;
+  --tone-info-foreground: 200 55% 82%;
+  --tone-info-strong: 200 55% 58%;
+  --shadow-elevated: 0 8px 22px rgba(0, 0, 0, 0.6);
+  --shadow-floating: 0 14px 32px rgba(0, 0, 0, 0.7);
+  --font-heading: "SF Mono", "JetBrains Mono", "Noto Sans SC", monospace;
+  --font-body: "Noto Sans SC", "PingFang SC", system-ui, sans-serif;
+}
+
+html[data-palette="obsidian"] {
+  font-size: 14px;
+}
+
+html[data-palette="obsidian"] body {
+  background-image: linear-gradient(180deg, hsl(var(--background)) 0%, hsl(240 4% 4%) 100%);
+}
+
+html[data-palette="obsidian"] .shell-header {
+  border-bottom-color: hsl(40 30% 30% / 0.5);
+}
+
+html[data-palette="obsidian"] .shell-sidebar {
+  border-right-color: hsl(40 24% 26% / 0.55);
+}
+
+html[data-palette="obsidian"] .shell-nav-item {
+  border-radius: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+html[data-palette="obsidian"] .ui-section-title,
+html[data-palette="obsidian"] h1,
+html[data-palette="obsidian"] h2,
+html[data-palette="obsidian"] h3 {
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+html[data-palette="obsidian"] :where(.rounded-sm, .rounded, .rounded-md, .rounded-lg, .rounded-xl, .rounded-2xl, .rounded-3xl) {
+  border-radius: 0;
+}
+
+/* 共享：palette 字体接驳 */
+html[data-palette] body,
+html[data-palette] input,
+html[data-palette] textarea,
+html[data-palette] button,
+html[data-palette] select {
+  font-family: var(--font-body);
+}
+
+html[data-palette] h1,
+html[data-palette] h2,
+html[data-palette] h3 {
+  font-family: var(--font-heading);
+}
