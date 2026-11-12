@@ -49,7 +49,10 @@ RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 
 # ------------------------------------------------------------------ Go 网关
 # 编译独立二进制；CGO_ENABLED=0 确保静态链接，无需运行时 libc。
-FROM golang:1.27-alpine AS gateway-build
+# 使用 golang:alpine（最新稳定 Go）确保满足 go.mod 中 >= 1.27 的要求。
+FROM golang:alpine AS gateway-build
+
+ENV GOTOOLCHAIN=auto
 
 WORKDIR /build/gateway
 
