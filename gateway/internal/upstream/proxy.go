@@ -3,9 +3,20 @@
 // requirements tokens). This package owns only the network I/O layer:
 //
 //  1. POST /v1/upstream/stream  — receive URL+headers+body from Python, send
-//     to upstream with a Chrome110 TLS fingerprint, stream SSE back.
+//     to upstream with a Chrome TLS fingerprint, stream SSE lines back.
+//     The upstream HTTP status is passed to Python via X-Upstream-Status so
+//     it can run ensure_ok() before consuming the stream.
 //  2. POST /v1/upstream/poll    — poll a conversation document for image
 //     file_ids, return them to Python as JSON.
+//
+// ID extraction mirrors the three Python regexes:
+//
+//	FILE_SERVICE_ID_RE  = file-service://([A-Za-z0-9_-]+)
+//	REAL_IMAGE_FILE_ID_RE = \bfile_00000000[a-f0-9]{24}\b
+//	SEDIMENT_ID_RE      = sediment://([A-Za-z0-9_-]+)
+//
+// The document walker visits every string value in the conversation mapping,
+// matching the Python _extract_image_reference_ids recursive walk.
 package upstream
 
 import (
@@ -16,12 +27,20 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
 	fhttp "github.com/bogdanfinn/fhttp"
 	tlsclient "github.com/bogdanfinn/tls-client"
 	"github.com/bogdanfinn/tls-client/profiles"
+)
+
+// Python-equivalent regexes for image ID extraction.
+var (
+	fileServiceRE    = regexp.MustCompile(`file-service://([A-Za-z0-9_\-]+)`)
+	realImageFileRE  = regexp.MustCompile(`\bfile_00000000[a-f0-9]{24}\b`)
+	sedimentRE       = regexp.MustCompile(`sediment://([A-Za-z0-9_\-]+)`)
 )
 
 // StreamRequest is the JSON body Python sends to /v1/upstream/stream.
@@ -38,6 +57,7 @@ type StreamRequest struct {
 type PollRequest struct {
 	URL         string            `json:"url"`
 	Headers     map[string]string `json:"headers"`
+	Impersonate string            `json:"impersonate"`
 	TimeoutMs   int               `json:"timeout_ms"`
 	IntervalMs  int               `json:"interval_ms"`
 	MaxAttempts int               `json:"max_attempts"`
@@ -79,7 +99,25 @@ func clientForProfile(impersonate string, timeoutSecs int) (tlsclient.HttpClient
 	return tlsclient.NewHttpClient(tlsclient.NewNoopLogger(), opts...)
 }
 
+// hopByHopHeaders are removed before forwarding upstream response headers to
+// the caller.  tls-client already decompresses bodies, so forwarding
+// Content-Encoding would cause the caller to try decompressing again.
+var hopByHopHeaders = map[string]bool{
+	"Content-Encoding":    true,
+	"Transfer-Encoding":   true,
+	"Connection":          true,
+	"Keep-Alive":          true,
+	"Proxy-Authenticate":  true,
+	"Proxy-Authorization": true,
+	"Te":                  true,
+	"Trailers":            true,
+	"Upgrade":             true,
+}
+
 // StreamHandler handles POST /v1/upstream/stream.
+// It proxies the request with a TLS fingerprint and streams SSE back.
+// The upstream HTTP status code is forwarded in X-Upstream-Status so the
+// Python caller can distinguish 200 from error responses before reading lines.
 func StreamHandler(w http.ResponseWriter, r *http.Request) {
 	var req StreamRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&req); err != nil {
@@ -131,13 +169,20 @@ func StreamHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
+	// Forward upstream headers, excluding hop-by-hop and Content-Encoding
+	// (tls-client already decoded the body; re-forwarding Content-Encoding
+	// would cause the Python caller's requests library to decode again).
 	for key, vals := range resp.Header {
+		if hopByHopHeaders[key] {
+			continue
+		}
 		for _, v := range vals {
 			w.Header().Add(key, v)
 		}
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
+	// X-Upstream-Status lets Python run ensure_ok() before reading lines.
 	w.Header().Set("X-Upstream-Status", fmt.Sprintf("%d", resp.StatusCode))
 	w.WriteHeader(http.StatusOK)
 
@@ -155,6 +200,7 @@ func StreamHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // PollHandler handles POST /v1/upstream/poll.
+// It GETs the conversation document repeatedly until image file_ids appear.
 func PollHandler(w http.ResponseWriter, r *http.Request) {
 	var req PollRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
@@ -174,8 +220,11 @@ func PollHandler(w http.ResponseWriter, r *http.Request) {
 	if req.MaxAttempts <= 0 {
 		req.MaxAttempts = 50
 	}
+	if req.Impersonate == "" {
+		req.Impersonate = "chrome110"
+	}
 
-	client, err := clientForProfile("chrome110", req.TimeoutMs/1000+5)
+	client, err := clientForProfile(req.Impersonate, req.TimeoutMs/1000+5)
 	if err != nil {
 		http.Error(w, "tls-client init: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -207,7 +256,7 @@ func PollHandler(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 		resp.Body.Close()
 		if readErr != nil || resp.StatusCode != 200 {
 			select {
@@ -238,6 +287,25 @@ func PollHandler(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, `{"error":"poll_timeout"}`, http.StatusGatewayTimeout)
 }
 
+// addUnique appends s to *out only when it is not already present.
+func addUnique(out *[]string, seen map[string]bool, s string) {
+	if s != "" && !seen[s] {
+		seen[s] = true
+		*out = append(*out, s)
+	}
+}
+
+// extractImageIDs mirrors Python's _extract_image_reference_ids + the
+// asset_pointer walk.  It applies three regexes to every string value found
+// anywhere in the conversation mapping:
+//
+//   - file-service://ID     → fileIDs
+//   - file_00000000<24hex>  → fileIDs  (raw file ID, no prefix)
+//   - sediment://ID         → sedimentIDs
+//
+// This deliberately matches what Python does: a full recursive walk of the
+// entire message object (content, metadata, parts, etc.) searching for any
+// string that matches the patterns, not just specific structural fields.
 func extractImageIDs(body []byte) (fileIDs []string, sedimentIDs []string) {
 	var doc map[string]json.RawMessage
 	if err := json.Unmarshal(body, &doc); err != nil {
@@ -251,53 +319,55 @@ func extractImageIDs(body []byte) (fileIDs []string, sedimentIDs []string) {
 	if err := json.Unmarshal(mapping, &msgs); err != nil {
 		return
 	}
-	seen := map[string]bool{}
+
+	seenFile := map[string]bool{}
+	seenSed := map[string]bool{}
+
 	for _, raw := range msgs {
-		var node struct {
-			Message *struct {
-				Content *struct {
-					ContentType string            `json:"content_type"`
-					Parts       []json.RawMessage `json:"parts"`
-				} `json:"content"`
-			} `json:"message"`
+		walkJSON(raw, func(s string) {
+			// file-service://ID
+			for _, m := range fileServiceRE.FindAllStringSubmatch(s, -1) {
+				addUnique(&fileIDs, seenFile, m[1])
+			}
+			// raw file ID: file_00000000<24 hex chars>
+			for _, m := range realImageFileRE.FindAllString(s, -1) {
+				addUnique(&fileIDs, seenFile, m)
+			}
+			// sediment://ID
+			for _, m := range sedimentRE.FindAllStringSubmatch(s, -1) {
+				addUnique(&sedimentIDs, seenSed, m[1])
+			}
+		})
+	}
+	return
+}
+
+// walkJSON recursively visits every JSON string value in the raw message,
+// calling fn for each one.  This replicates Python's recursive walk that
+// handles dicts and lists at any nesting depth.
+func walkJSON(raw json.RawMessage, fn func(string)) {
+	if len(raw) == 0 {
+		return
+	}
+	switch raw[0] {
+	case '"':
+		var s string
+		if json.Unmarshal(raw, &s) == nil {
+			fn(s)
 		}
-		if err := json.Unmarshal(raw, &node); err != nil || node.Message == nil {
-			continue
+	case '{':
+		var obj map[string]json.RawMessage
+		if json.Unmarshal(raw, &obj) == nil {
+			for _, v := range obj {
+				walkJSON(v, fn)
+			}
 		}
-		ct := node.Message.Content
-		if ct == nil {
-			continue
-		}
-		for _, rawPart := range ct.Parts {
-			var part struct {
-				ContentType  string   `json:"content_type"`
-				AssetPointer string   `json:"asset_pointer"`
-				FileIDs      []string `json:"file_ids"`
-				SedimentIDs  []string `json:"sediment_ids"`
-			}
-			if err := json.Unmarshal(rawPart, &part); err != nil {
-				continue
-			}
-			if part.AssetPointer != "" && !seen[part.AssetPointer] {
-				seen[part.AssetPointer] = true
-				if strings.HasPrefix(part.AssetPointer, "file-service://") {
-					id := strings.TrimPrefix(part.AssetPointer, "file-service://")
-					fileIDs = append(fileIDs, id)
-				}
-			}
-			for _, id := range part.FileIDs {
-				if !seen[id] {
-					seen[id] = true
-					fileIDs = append(fileIDs, id)
-				}
-			}
-			for _, id := range part.SedimentIDs {
-				if !seen[id] {
-					seen[id] = true
-					sedimentIDs = append(sedimentIDs, id)
-				}
+	case '[':
+		var arr []json.RawMessage
+		if json.Unmarshal(raw, &arr) == nil {
+			for _, v := range arr {
+				walkJSON(v, fn)
 			}
 		}
 	}
-	return
 }

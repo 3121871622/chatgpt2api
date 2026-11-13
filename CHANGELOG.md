@@ -7,6 +7,25 @@
 
 > 更新时间精确到分钟；历史条目按镜像构建时间回填，缺少构建记录的旧版本分钟位记为 00:00。
 
+## [1.9.11] 2026-11-13 08:45
+
+全面修复 Go 上游代理的三处缺陷（SSE 流代理 + 轮询路径均受影响）。
+
+### 修复
+
++ [修复] **extractImageIDs 覆盖不完整**：原实现只扫描 `content.parts` 的结构化字段，完全遗漏了 `metadata` 里的 `asset_pointer`、深层嵌套的 `asset_pointer`、`sediment://` 格式和 `file_00000000<24hex>` 裸 ID。新实现改用对整个消息对象进行递归的字符串扫描（`walkJSON`），与 Python `_extract_image_reference_ids` 完全对齐。
++ [修复] **sediment:// ID 完全没有提取**：新增正则 `sediment://([A-Za-z0-9_\-]+)` 并填充到 `PollResponse.SedimentIDs`，对齐 Python 的 `SEDIMENT_ID_RE`。
++ [修复] **裸 file_00000000... 格式未支持**：新增正则 `\bfile_00000000[a-f0-9]{24}\b`，对齐 Python 的 `REAL_IMAGE_FILE_ID_RE`。
++ [修复] **SSE 代理透传 Content-Encoding 导致双重解压**：tls-client 已经解压响应体，但原代码将上游 `Content-Encoding: gzip/br` 头原样转发给 Python，造成 requests 再次解压产生乱码。新增 hop-by-hop header 过滤，明确删除 `Content-Encoding`、`Transfer-Encoding` 等头。
++ [修复] **上游真实 HTTP 状态码未传递**：StreamHandler 始终返回 200，Python 侧 `ensure_ok` 无法检测非 200 响应。新增 `X-Upstream-Status` 响应头携带上游真实状态码。
++ [修复] **轮询路径未支持 Impersonate 参数**：PollRequest 新增 `impersonate` 字段，PollHandler 使用该值选择 TLS 指纹，而非写死 `chrome110`。
+
+### 验证
+
++ Go：14 个 upstream 测试 + 完整 gateway 测试套件全通过。
++ Python：654 passed，1 skipped。
++ 新增测试覆盖：`TestStreamHandler_ExposesUpstreamStatus`、`TestStreamHandler_DropsContentEncoding`、`TestPollHandler_SedimentIDs`、`TestExtractImageIDs_SedimentAssetPointer`、`TestExtractImageIDs_RawFileID`、`TestExtractImageIDs_InMetadata`、`TestExtractImageIDs_NoDuplicates`。
+
 ## [1.9.10] 2026-11-13 08:30
 
 紧急修复 1.9.9 引入的图片全量失败事故（image_poll_timeout）。
