@@ -2266,17 +2266,25 @@ class AccountService:
     def list_expiring_access_tokens(self) -> list[str]:
         self._refresh_accounts_snapshot_if_stale()
         with self._lock:
-            return [
-                token
-                for account in self._accounts.values()
-                if account.get("status") in {"正常", "限流"}
-                and account.get("last_remote_check_result") != "pending"
-                and str(account.get("refresh_token") or "").strip()
-                and not account.get("refresh_token_invalid_at")
-                and not self._token_refresh_backed_off(account)
-                and (token := str(account.get("access_token") or "").strip())
-                and self._token_needs_refresh(token)
-            ]
+            # Snapshot only: copying ~10k references costs well under a
+            # millisecond.  Every per-account check below (JWT expiry decode in
+            # _token_needs_refresh, timestamp parsing in
+            # _token_refresh_backed_off) is pure and lock-free, so it runs
+            # outside the lock.  Doing that work while holding the global
+            # account lock blocked _update_account_impl for seconds and made
+            # the lock wait grow with pool size and traffic.
+            snapshot = list(self._accounts.values())
+        return [
+            token
+            for account in snapshot
+            if account.get("status") in {"正常", "限流"}
+            and account.get("last_remote_check_result") != "pending"
+            and str(account.get("refresh_token") or "").strip()
+            and not account.get("refresh_token_invalid_at")
+            and not self._token_refresh_backed_off(account)
+            and (token := str(account.get("access_token") or "").strip())
+            and self._token_needs_refresh(token)
+        ]
 
     def list_tokens(self) -> list[str]:
         self._refresh_accounts_snapshot_if_stale()
@@ -3740,23 +3748,26 @@ class AccountService:
         """
         self._refresh_accounts_snapshot_if_stale()
         now = datetime.now(timezone.utc)
-        tokens: list[str] = []
         with self._lock:
-            for item in self._accounts.values():
-                if item.get("status") != "限流":
+            # Snapshot only; filtering runs outside the lock so a full-pool
+            # scan never blocks account updates for seconds.
+            snapshot = list(self._accounts.values())
+        tokens: list[str] = []
+        for item in snapshot:
+            if item.get("status") != "限流":
+                continue
+            if item.get("last_remote_check_result") == "pending":
+                continue
+            token = item.get("access_token") or ""
+            if not token:
+                continue
+            restore_at = self._parse_time(item.get("restore_at"))
+            if restore_at is not None:
+                if restore_at.tzinfo is None:
+                    restore_at = restore_at.replace(tzinfo=timezone.utc)
+                if restore_at > now:
                     continue
-                if item.get("last_remote_check_result") == "pending":
-                    continue
-                token = item.get("access_token") or ""
-                if not token:
-                    continue
-                restore_at = self._parse_time(item.get("restore_at"))
-                if restore_at is not None:
-                    if restore_at.tzinfo is None:
-                        restore_at = restore_at.replace(tzinfo=timezone.utc)
-                    if restore_at > now:
-                        continue
-                tokens.append(token)
+            tokens.append(token)
         return tokens
 
     def list_quota_probe_tokens(self, limit: int = 10) -> list[str]:
@@ -3767,33 +3778,34 @@ class AccountService:
         """
         self._refresh_accounts_snapshot_if_stale()
         now = datetime.now(timezone.utc)
-        tokens: list[str] = []
         with self._lock:
-            for item in self._accounts.values():
-                token = str(item.get("access_token") or "").strip()
-                if not token or item.get("status") != "正常":
-                    continue
-                if bool(item.get("image_quota_unknown")):
-                    continue
+            snapshot = list(self._accounts.values())
+        tokens: list[str] = []
+        for item in snapshot:
+            token = str(item.get("access_token") or "").strip()
+            if not token or item.get("status") != "正常":
+                continue
+            if bool(item.get("image_quota_unknown")):
+                continue
+            try:
+                quota = int(item.get("quota") or 0)
+            except (TypeError, ValueError):
+                quota = 0
+            if quota > 0:
+                continue
+            stamp = str(item.get("last_remote_checked_at") or "").strip()
+            if stamp:
                 try:
-                    quota = int(item.get("quota") or 0)
-                except (TypeError, ValueError):
-                    quota = 0
-                if quota > 0:
-                    continue
-                stamp = str(item.get("last_remote_checked_at") or "").strip()
-                if stamp:
-                    try:
-                        checked = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-                        if checked.tzinfo is None:
-                            checked = checked.replace(tzinfo=timezone.utc)
-                        if (now - checked).total_seconds() < 12 * 3600:
-                            continue
-                    except ValueError:
-                        pass
-                tokens.append(token)
-                if len(tokens) >= max(1, int(limit)):
-                    break
+                    checked = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                    if checked.tzinfo is None:
+                        checked = checked.replace(tzinfo=timezone.utc)
+                    if (now - checked).total_seconds() < 12 * 3600:
+                        continue
+                except ValueError:
+                    pass
+            tokens.append(token)
+            if len(tokens) >= max(1, int(limit)):
+                break
         return tokens
 
     def note_slow_image_stream(
@@ -3992,13 +4004,14 @@ class AccountService:
     def list_normal_tokens(self) -> list[str]:
         self._refresh_accounts_snapshot_if_stale()
         with self._lock:
-            return [
-                token
-                for item in self._accounts.values()
-                if item.get("status") == "正常"
-                   and item.get("last_remote_check_result") != "pending"
-                   and (token := item.get("access_token") or "")
-            ]
+            snapshot = list(self._accounts.values())
+        return [
+            token
+            for item in snapshot
+            if item.get("status") == "正常"
+               and item.get("last_remote_check_result") != "pending"
+               and (token := item.get("access_token") or "")
+        ]
 
     @classmethod
     def _pool_health_freshness_seconds(cls, freshness_seconds: int | float | None = None) -> int:

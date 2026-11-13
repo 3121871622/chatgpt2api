@@ -7,6 +7,24 @@
 
 > 更新时间精确到分钟；历史条目按镜像构建时间回填，缺少构建记录的旧版本分钟位记为 00:00。
 
+## [1.9.12] 2026-11-13 12:40
+
+消除账号池全量扫描持锁导致的锁等待恶化。
+
+### 修复
+
++ [修复] `list_expiring_access_tokens()` 原先在持有全局账号锁的情况下遍历 10,279 个账号并对每个账号解码 JWT（`_token_needs_refresh`）与解析时间戳。流量上升后该函数持锁 1–2 秒，导致账号写入路径 `_update_account_impl` 排队等待，运营机实测 `max_wait` 从 2.8 秒升至 9.1 秒、`slow_waits` 半小时增加 48 次。改为锁内只复制账号引用快照（亚毫秒），全部过滤逻辑移出锁外执行。
++ [修复] `list_limited_tokens()` 同样改为快照后锁外过滤，避免全量遍历期间阻塞账号更新。
++ [修复] `list_quota_probe_tokens()` 同样改为快照后锁外过滤。
++ [修复] `list_normal_tokens()` 同样改为快照后锁外过滤。
+
+上述四个方法由 `account-lifecycle-watcher` 在同一轮循环中依次调用，此前累计持锁时间可达数秒。
+
+### 验证
+
++ Python：655 passed，1 skipped。
++ 新增回归测试 `test_expiring_scan_does_not_hold_account_lock_while_filtering`：在 JWT 检查执行期间以非阻塞方式抢锁，断言锁已释放。
+
 ## [1.9.11] 2026-11-13 08:45
 
 全面修复 Go 上游代理的三处缺陷（SSE 流代理 + 轮询路径均受影响）。

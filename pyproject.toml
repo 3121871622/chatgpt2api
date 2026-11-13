@@ -1,6 +1,6 @@
 [project]
 name = "qingmeng-gpt"
-version = "1.9.11"
+version = "1.9.12"
 description = "倾梦GPT绘画企业级百万号池系统"
 readme = "README.md"
 license = "AGPL-3.0-only"
