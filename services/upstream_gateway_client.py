@@ -41,7 +41,30 @@ def _token() -> str:
 
 
 def is_enabled() -> bool:
+    """True when a gateway URL or token is configured at all."""
     return bool(_env("UPSTREAM_GATEWAY_TOKEN") or _env("UPSTREAM_GATEWAY_URL"))
+
+
+def _switch(name: str) -> bool:
+    """Explicit opt-in switch; disabled unless set to 1/true/yes/on."""
+    return _env(name, "0").lower() in {"1", "true", "yes", "on"}
+
+
+def stream_enabled() -> bool:
+    """The SSE stream proxy must be opted in via UPSTREAM_GATEWAY_STREAM=1."""
+    return is_enabled() and _switch("UPSTREAM_GATEWAY_STREAM")
+
+
+def poll_enabled() -> bool:
+    """The conversation-document poll proxy must be opted in via
+    UPSTREAM_GATEWAY_POLL=1.
+
+    This defaults to OFF: the first attempt shipped without the required
+    X-OpenAI-Target-Path/Route headers, so every poll failed and image calls
+    fell back to a zero-budget timeout.  Do not enable without validating
+    against a live account.
+    """
+    return is_enabled() and _switch("UPSTREAM_GATEWAY_POLL")
 
 
 def _get_session() -> requests.Session:
@@ -80,7 +103,7 @@ def stream_conversation(
     unavailable, unreachable, or returns a non-200 status so the caller can
     fall back to the Python path.
     """
-    if not is_enabled():
+    if not stream_enabled():
         return None
     payload = {
         "url": url,
@@ -138,8 +161,14 @@ def poll_image_ids(
     Returns a dict with 'file_ids', 'sediment_ids', 'attempts', 'elapsed_ms'
     on success.  Returns None if the gateway is unavailable or the poll times
     out (caller should fall back to the Python poll path).
+
+    ``headers`` MUST be the complete upstream header set produced by
+    ``OpenAIBackendAPI._headers(path)`` — including ``X-OpenAI-Target-Path``
+    and ``X-OpenAI-Target-Route`` plus the browser fingerprint headers.
+    Sending a reduced header set makes upstream reject the document request
+    and the poll then burns its whole budget for nothing.
     """
-    if not is_enabled():
+    if not poll_enabled():
         return None
     payload = {
         "url": url,

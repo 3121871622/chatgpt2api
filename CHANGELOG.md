@@ -7,6 +7,26 @@
 
 > 更新时间精确到分钟；历史条目按镜像构建时间回填，缺少构建记录的旧版本分钟位记为 00:00。
 
+## [1.9.10] 2026-11-13 08:30
+
+紧急修复 1.9.9 引入的图片全量失败事故（image_poll_timeout）。
+
+### 修复
+
++ [修复] 1.9.9 的 Go 轮询快速路径向上游请求对话文档时只带了精简请求头，缺少上游必需的 `X-OpenAI-Target-Path` / `X-OpenAI-Target-Route` 及浏览器指纹头，上游拒绝后 Go 空转至 60 秒超时；同时该路径失败后直接抛 `ImagePollTimeoutError`，导致 Python 原有轮询路径完全没有机会执行。结果 01:00–08:15 图片调用近乎全失败（每小时失败 45–298 笔）。
++ [修复] 轮询快速路径改用 `self._headers(conv_path)` 的完整上游请求头集合（含 target path/route 与全部指纹头）。
++ [修复] Go 轮询未返回结果时不再短路，回落前重置计时起点，让 Python 轮询仍获得完整预算。
+
+### 变更
+
++ [变更] Go 上游代理改为显式开关，默认全部关闭：`UPSTREAM_GATEWAY_STREAM=1` 才启用 SSE 流代理，`UPSTREAM_GATEWAY_POLL=1` 才启用轮询代理。未设置时行为与 1.9.8 完全一致。
++ [变更] 新增 `upstream_gateway_client.stream_enabled()` / `poll_enabled()`，替代原先只要配置了 URL 或 token 就启用的行为。
+
+### 验证
+
++ Python：637 passed，1 skipped。
++ 运营机回滚验证：08:15 前每 5 分钟失败 19–27 笔、成功 0–2 笔；回滚后 08:15 起成功 6 笔、失败 0 笔，恢复 100%。
+
 ## [1.9.9] 2026-11-13 00:30
 
 Go 上游代理：SSE 流转发 + 图片轮询，释放 Python 线程。

@@ -8,7 +8,7 @@
 
 services:
   app:
-    image: ${QINGMENG_IMAGE:-qingmeng/qingmeng-gpt:1.9.9}
+    image: ${QINGMENG_IMAGE:-qingmeng/qingmeng-gpt:1.9.10}
     build:
       context: .
       dockerfile: Dockerfile

@@ -3067,34 +3067,28 @@ class OpenAIBackendAPI:
         self._reset_image_result_timing()
         started_at = time.monotonic()
 
-        # Fast path: delegate polling to the Go upstream-gateway goroutine,
-        # freeing the Python thread during the poll wait.  Falls through to
-        # the Python poll path only when the gateway is unavailable or returns
-        # quickly (indicating a transient error).  If Go consumed the full
-        # budget and timed out, raise ImagePollTimeoutError immediately —
-        # there is no point in starting a Python poll with zero remaining time.
-        if _ugw.is_enabled() and not (initial_file_ids or initial_sediment_ids):
-            conv_url = f"{self.base_url}/backend-api/conversation/{conversation_id}"
-            poll_headers = {
-                "Authorization": f"Bearer {self.access_token}",
-                **{k: v for k, v in self.session.headers.items()
-                   if k.lower() in (
-                       "user-agent", "oai-device-id", "oai-session-id",
-                       "oai-language", "oai-client-version",
-                   )},
-            }
+        # Fast path: delegate polling to the Go upstream-gateway goroutine.
+        # Opt-in only (UPSTREAM_GATEWAY_POLL=1).  Whenever the gateway does not
+        # return file ids we fall through to the proven Python poll path; we
+        # never short-circuit it, because a failed gateway round-trip must not
+        # consume the request's polling budget.
+        if _ugw.poll_enabled() and not (initial_file_ids or initial_sediment_ids):
+            conv_path = f"/backend-api/conversation/{conversation_id}"
+            # Full upstream header set: X-OpenAI-Target-Path/Route and the
+            # fingerprint headers are required, a reduced set is rejected.
+            poll_headers = self._headers(conv_path)
             gw_result = _ugw.poll_image_ids(
-                url=conv_url,
+                url=self.base_url + conv_path,
                 headers=poll_headers,
                 timeout_ms=int(timeout_secs * 1000),
                 interval_ms=int(max(0.5, float(config.image_poll_interval_secs)) * 1000),
                 max_attempts=int(timeout_secs / max(0.5, float(config.image_poll_interval_secs))) + 5,
             )
-            if gw_result is not None:
+            if gw_result:
                 gw_file_ids: list[str] = gw_result.get("file_ids") or []
                 gw_sed_ids: list[str] = gw_result.get("sediment_ids") or []
                 if gw_file_ids or gw_sed_ids:
-                    logger.debug({
+                    logger.info({
                         "event": "image_poll_via_gateway",
                         "conversation_id": conversation_id,
                         "file_ids": gw_file_ids,
@@ -3104,16 +3098,9 @@ class OpenAIBackendAPI:
                     })
                     self._add_image_result_timing("poll_wait_ms", gw_result.get("elapsed_ms") or 0)
                     return gw_file_ids, gw_sed_ids
-            # gw_result is None: gateway timed out or was unavailable.
-            # If the gateway consumed most of the budget (< 10 s left), there
-            # is no point starting a Python poll — raise timeout directly.
-            elapsed = time.monotonic() - started_at
-            if elapsed >= timeout_secs - 10.0:
-                self._add_image_result_timing("poll_wait_ms", int(elapsed * 1000))
-                raise ImagePollTimeoutError(
-                    "Image generation timed out. Please try again."
-                )
-            # Gateway was down / returned fast → fall through to Python poll.
+            # Gateway returned nothing: reset the budget clock so the Python
+            # poll still gets the full window instead of inheriting a spent one.
+            started_at = time.monotonic()
 
         attempt = 0
         miss_streak = 0
