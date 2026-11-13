@@ -719,10 +719,19 @@ class AccountService:
         revision: str,
         snapshot_checked: bool = True,
         preserve_index: bool = False,
+        prepared_persisted: dict[str, dict] | None = None,
     ) -> None:
         token_rotations = self._passive_token_rotations_locked(accounts)
         self._accounts = self._build_account_store(accounts)
-        self._persisted_accounts = deepcopy(persisted_accounts)
+        # deepcopy of the whole pool is pure (it only reads the argument), so a
+        # caller may hand in an already-copied mapping to keep this copy out of
+        # the lock hold.  Falling back to deepcopy keeps every other call site
+        # unchanged.
+        self._persisted_accounts = (
+            prepared_persisted
+            if prepared_persisted is not None
+            else deepcopy(persisted_accounts)
+        )
         self._accounts_revision = revision
         for new_token, alias_sources in token_rotations:
             self._move_account_runtime_token_locked(new_token, alias_sources)
@@ -781,6 +790,12 @@ class AccountService:
                         self._account_snapshot_checked_at = time.monotonic()
                 return False
 
+            # Pay for the full-pool deep copy before taking the account lock.
+            # It only reads `loaded` (a private dict returned by the adapter),
+            # and doing it inside the lock held the pool for seconds on every
+            # revision bump, which queued account updates and selections.
+            prepared_persisted = deepcopy(loaded)
+
             with self._image_slot_condition:
                 if self._accounts_revision != expected_revision:
                     return False
@@ -791,6 +806,7 @@ class AccountService:
                     loaded,
                     persisted_accounts=loaded,
                     revision=revision,
+                    prepared_persisted=prepared_persisted,
                 )
                 return True
         finally:

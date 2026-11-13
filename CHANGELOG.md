@@ -7,6 +7,23 @@
 
 > 更新时间精确到分钟；历史条目按镜像构建时间回填，缺少构建记录的旧版本分钟位记为 00:00。
 
+## [1.9.13] 2026-11-14 01:10
+
+继续降低账号快照重载时的锁持有时间。
+
+### 修复
+
++ [修复] 快照重载路径 `_refresh_accounts_snapshot_if_stale()` 在持有账号锁时对全池 10,277 个账号执行 `deepcopy`，每次存储 revision 变化（账号治理删号、watcher 更新额度）都会触发，锁被占用 2–6 秒，导致 `_refresh_accounts_snapshot_if_stale`、`get_account`、`_record_token_refresh_error`、`resolve_access_token` 等调用方排队。实测运营机 `slow_waits` 半小时内从 1 增至 430、`max_wait` 从 1043ms 升至 5695ms。
++ [修复] 将该 `deepcopy` 提到获取账号锁之前执行（只读取调用方传入的私有 dict，无并发可见性风险），锁内仅保留原子赋值与运行时索引重建。`_apply_account_view_locked()` 新增可选参数 `prepared_persisted`，其余 5 个调用点行为不变。
+
+### 说明
+
++ `_build_account_store()` 会写入 `_by_management_id`、`_token_order`、`_group_counts` 与 `_selection_index`，这些状态必须与 `_accounts` 的替换处于同一临界区，因此仍保留在锁内。
+
+### 验证
+
++ Python：655 passed，1 skipped。
+
 ## [1.9.12] 2026-11-13 12:40
 
 消除账号池全量扫描持锁导致的锁等待恶化。
