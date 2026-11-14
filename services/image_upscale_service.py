@@ -28,6 +28,36 @@ _K_ALIASES: dict[str, tuple[int, int]] = {
     "8k": (8192, 8192),
 }
 
+# Size strings the upstream OpenAI codex image endpoint accepts.  When a
+# request uses a k-alias (2k/4k/8k) the upstream cannot interpret it, so we
+# request the largest accepted size and upscale locally afterwards.
+_UPSTREAM_SIZES: tuple[str, ...] = (
+    "1024x1024",
+    "1024x1536",
+    "1536x1024",
+)
+
+
+def _is_k_alias(value: object) -> bool:
+    return str(value or "").strip().lower() in _K_ALIASES
+
+
+def normalize_upstream_size(value: object) -> str:
+    """Return a size the upstream OpenAI image endpoint accepts.
+
+    K-aliases (``2k``/``4k``/``8k``) are not understood upstream and would be
+    rejected or silently produce a 1024 image; map them to ``1024x1024`` so
+    the upstream generates a full-size base image, and let the local
+    upscaler raise it to the requested resolution afterwards.  Other size
+    strings are passed through unchanged (the caller already validated them).
+    """
+    text = str(value or "").strip().lower()
+    if not text or text == "auto":
+        return "1024x1024"
+    if text in _K_ALIASES:
+        return "1024x1024"
+    return str(value).strip() or "1024x1024"
+
 
 def _target_size(value: object) -> tuple[int, int] | None:
     text = str(value or "").strip().lower()

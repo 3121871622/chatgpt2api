@@ -1266,6 +1266,12 @@ class OpenAIBackendAPI:
         if not self.access_token:
             raise RuntimeError("access_token is required for codex image endpoints")
         self._ensure_codex_source_account()
+        # K-aliases (2k/4k/8k) are not understood by the upstream image API and
+        # would be rejected or silently produce a 1024 image; normalise them to
+        # a size the upstream accepts and let the local upscaler raise the
+        # generated base image to the requested resolution afterwards.
+        from services.image_upscale_service import normalize_upstream_size
+        upstream_size = normalize_upstream_size(size)
         path = "/backend-api/codex/responses"
         payload = {
             "model": CODEX_RESPONSES_MODEL,
@@ -1276,7 +1282,7 @@ class OpenAIBackendAPI:
                 "type": "image_generation",
                 "model": "gpt-image-2",
                 "action": "edit" if images else "generate",
-                "size": str(size or "1024x1024"),
+                "size": upstream_size,
                 "quality": str(quality or "auto"),
                 "output_format": "png",
             }],

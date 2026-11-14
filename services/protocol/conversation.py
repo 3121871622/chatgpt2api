@@ -477,7 +477,13 @@ _GIF_PROMPT_RE = re.compile(
 def build_image_prompt(prompt: str, size: str | None, quality: str = "auto") -> str:
     hints = []
     if size:
-        hints.append(f"输出图片尺寸为 {size}。")
+        # Translate k-aliases to pixel dimensions in the prompt hint so the
+        # model receives a concrete description instead of an opaque shorthand.
+        from services.image_upscale_service import _K_ALIASES
+        size_text = size.strip()
+        resolved = _K_ALIASES.get(size_text.lower())
+        display_size = f"{resolved[0]}x{resolved[1]}" if resolved else size_text
+        hints.append(f"输出图片尺寸为 {display_size}。")
     if quality:
         hints.append(f"输出图片质量为 {quality}。")
     if _GIF_PROMPT_RE.search(prompt or ""):
