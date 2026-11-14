@@ -84,7 +84,7 @@ def _sharp_lanczos3(image_data: bytes, target: tuple[int, int]) -> bytes:
 
 
 def upscale_image_if_needed(image_data: bytes, requested_size: object) -> bytes:
-    if not image_data:
+    if not image_data or not config.image_upscale_enabled:
         return image_data
     # Resizing a GIF through Sharp/Pillow flattens it to a single frame.
     if image_mime_type(image_data) == "image/gif":
@@ -95,10 +95,6 @@ def upscale_image_if_needed(image_data: bytes, requested_size: object) -> bytes:
         return image_data
     if source[0] >= target[0] and source[1] >= target[1]:
         return image_data
-    # When the user explicitly names a target that is larger than the source
-    # the intent to upscale is unambiguous, so we always honour it even when
-    # the global image_upscale_enabled flag is off.  The flag only guards
-    # automatic/background upscaling, not an explicit caller request.
 
     engine = config.image_upscale_engine
     with _UPSCALE_LOCK:
