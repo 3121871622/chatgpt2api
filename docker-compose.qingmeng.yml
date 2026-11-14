@@ -2,7 +2,7 @@
 #
 # 使用：
 #   1) 准备镜像：本机已有镜像，或保留下面的 build 段首次构建
-#      docker load -i qingmeng-1.9.14.tar.gz
+#      docker load -i qingmeng-1.9.15.tar.gz
 #   2) 准备数据目录（必须属主 10001，否则容器无法写库）：
 #      mkdir -p data && chown -R 10001:10001 data
 #   3) 启动：
@@ -16,7 +16,7 @@
 
 services:
   app:
-    image: ${QINGMENG_IMAGE:-qingmeng/qingmeng-gpt:1.9.14}
+    image: ${QINGMENG_IMAGE:-qingmeng/qingmeng-gpt:1.9.15}
     build:
       context: .
       dockerfile: Dockerfile

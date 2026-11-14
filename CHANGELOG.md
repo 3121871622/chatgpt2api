@@ -7,6 +7,21 @@
 
 > 更新时间精确到分钟；历史条目按镜像构建时间回填，缺少构建记录的旧版本分钟位记为 00:00。
 
+## [1.9.15] 2026-11-14 23:00
+
+修复图片放大器失效问题。
+
+### 修复
+
++ [修复] `image_upscale_service._target_size()` 只认 `WIDTHxHEIGHT` 字面格式，不认 `2k`/`4k`/`8k` 别名，导致用户传入常用分辨率名称时解析失败返回 `None`，放大直接跳过。新增 `_K_ALIASES` 映射：`2k→2048×2048`、`4k→4096×4096`、`8k→8192×8192`，大小写不敏感。
++ [修复] `upscale_image_if_needed()` 在目标尺寸大于源尺寸时（即需要放大），仍被 `config.image_upscale_enabled`（默认 `False`）拦截返回原图。用户明确指定了比原图更大的分辨率，意图放大是无歧义的，全局开关只应管控自动/后台放大，不应拦截显式请求。移除该拦截；降档（target < source）路径仍受 `image_downscale_to_requested` 控制，行为不变。
++ 同步修复 `chatgpt2api-next` 中同一文件（逻辑相同，结构略有差异）。
+
+### 验证
+
++ Python 全量：663 passed，1 skipped。
++ 新增/更新测试：`test_explicit_target_upscales_even_when_disabled`、`test_k_alias_parses_to_square`、`test_k_alias_uppercase_parses`、`test_disabled_returns_original_for_oversized_source`，共 8 个放大器测试全部通过。
+
 ## [1.9.14] 2026-11-14 13:20
 
 修复 GIF / 文件上传类请求因能力过滤位置不当导致的选号失败。
