@@ -2494,7 +2494,18 @@ class AccountService:
             deadline_monotonic: float | None = None,
             *,
             wait: bool = True,
+            required_capabilities: set[str] | tuple[str, ...] | None = None,
     ) -> str | None:
+        # Capabilities that are cheap to verify locally and expensive to get
+        # wrong upstream: an account whose recorded capability map lacks them
+        # can only burn an upstream attempt, so steer selection away from it
+        # instead of letting the caller reject it afterwards.
+        hard_required = {
+            str(item).strip()
+            for item in (required_capabilities or ())
+            if str(item).strip() in {"gif", "file_upload"}
+        }
+        capability_skipped: set[str] = set()
         # Fast path: delegate to the Go gateway when it is available.
         # The gateway maintains its own in-memory index and returns in <1 ms
         # without touching the Python global lock.  On any failure (network,
@@ -2537,6 +2548,11 @@ class AccountService:
 
         plans = self._index_plan_filter(plan_type, plan_types)
         sources = self._index_source_filter(source_type)
+        if hard_required:
+            # Waiting cannot help when the pool contains no account that either
+            # advertises the capability or is still unclassified: fail fast
+            # instead of blocking the request until its deadline.
+            self._require_hard_capability(hard_required)
         while True:
             with self._image_slot_condition:
                 remaining = (
@@ -2557,6 +2573,9 @@ class AccountService:
                     for token in (excluded_tokens or set())
                     if token
                 }
+                # Never hand back an account this call already rejected for a
+                # missing hard capability: the caller would only reject it again.
+                resolved_excluded_tokens |= capability_skipped
                 if not self._selection_index.has_ready(
                     IMAGE_MODE,
                     plans=plans,
@@ -2582,6 +2601,26 @@ class AccountService:
                     self._image_inflight[access_token] = (
                         int(self._image_inflight.get(access_token, 0)) + 1
                     )
+                    if hard_required:
+                        known_capabilities = (
+                            self._accounts.get(access_token) or {}
+                        ).get("image_capabilities")
+                        if (
+                            isinstance(known_capabilities, dict)
+                            and known_capabilities
+                            and not hard_required.issubset(known_capabilities)
+                        ):
+                            # Give the lease straight back (inflight + selection
+                            # index) and skip it, instead of returning an
+                            # account the caller must reject and re-request.
+                            self._release_image_slot_locked(access_token)
+                            capability_skipped.add(access_token)
+                            if len(capability_skipped) >= 300:
+                                raise ImageAccountSelectionError(
+                                    "capability_unavailable",
+                                    "no account has the required image capability",
+                                )
+                            continue
                     return access_token
                 if not wait:
                     return None
@@ -2592,6 +2631,32 @@ class AccountService:
             # account lock before considering another candidate so a remote delete
             # or disable cannot be leased from the stale in-memory view.
             self._refresh_accounts_snapshot_if_stale(wait_for_refresh=True)
+
+    def _require_hard_capability(self, required: set[str]) -> None:
+        """Raise capability_unavailable when nothing in the pool can serve it.
+
+        An account is a possible candidate when it either advertises every
+        required capability, or has no recorded capability map at all (never
+        classified, so it may still work). Only when neither exists is waiting
+        pointless.
+        """
+        required = {str(item).strip() for item in (required or ()) if str(item).strip()}
+        if not required:
+            return
+        with self._lock:
+            snapshot = list(self._accounts.values())
+        for item in snapshot:
+            if not self._is_image_account_available(item):
+                continue
+            known = item.get("image_capabilities")
+            if not isinstance(known, dict) or not known:
+                return  # unclassified account: give it a chance
+            if required.issubset(known):
+                return
+        raise ImageAccountSelectionError(
+            "capability_unavailable",
+            "no account has the required image capability",
+        )
 
     def _no_ready_candidate_error(
             self,
@@ -2819,6 +2884,7 @@ class AccountService:
                     source_type=source_type,
                     plan_types=plan_types,
                     deadline_monotonic=selection_deadline,
+                    required_capabilities=required_capabilities,
                 )
             except ImageAccountSelectionError as exc:
                 if exc.kind == "deadline_exceeded":
@@ -2844,6 +2910,7 @@ class AccountService:
                         plan_types=plan_types,
                         deadline_monotonic=selection_deadline,
                         wait=False,
+                        required_capabilities=required_capabilities,
                     )
                 except ImageAccountSelectionError as exc:
                     if exc.kind == "deadline_exceeded":
