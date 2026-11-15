@@ -473,12 +473,6 @@ _GIF_PROMPT_RE = re.compile(
     r"(?i)(\bgif\b|动图|动态图|动态图片|循环动画|animated\s+gif|gif\s+animation)"
 )
 
-# Selection filters candidates on hard capabilities (gif / file_upload), so this
-# post-filter only catches accounts whose capability record changed between the
-# two reads. A low limit keeps an unserviceable request failing in seconds
-# instead of spinning through 100 selections (~80s) before returning 503.
-_CAPABILITY_REJECTION_LIMIT = 5
-
 
 def build_image_prompt(prompt: str, size: str | None, quality: str = "auto") -> str:
     hints = []
@@ -2251,7 +2245,6 @@ def _generate_single_image(
     retry_error: ImageGenerationError | None = None
     pending_switch_attempt_index: int | None = None
     account_attempt_started = 0.0
-    capability_rejections = 0
     max_account_attempts = (
         config.image_max_account_attempts
         if config.image_account_retry_enabled
@@ -2330,37 +2323,14 @@ def _generate_single_image(
                     required_capabilities=required_capabilities,
                 )
                 attempted_tokens.add(token)
-                # GIF/file-upload have explicit capability records. When an
-                # account has a known capability map and lacks the required
-                # one, retrying it can only fail; reject it locally instead of
-                # burning an upstream attempt.
-                hard_required = {
-                    capability for capability in required_capabilities
-                    if capability in {"gif", "file_upload"}
-                }
-                if hard_required:
-                    candidate = account_service.get_account(token) or {}
-                    known = candidate.get("image_capabilities")
-                    if isinstance(known, dict) and known:
-                        missing = {
-                            capability for capability in hard_required
-                            if capability not in known
-                        }
-                        if missing:
-                            capability_rejections += 1
-                            account_service.release_image_slot(token)
-                            # Selection already filters on hard capabilities, so
-                            # reaching even a handful of rejections means the
-                            # pool genuinely cannot serve this capability. Stop
-                            # early: spinning to 100 rejected each cost ~0.8s of
-                            # selection work and made the request hang for over a
-                            # minute before returning 503.
-                            if capability_rejections >= _CAPABILITY_REJECTION_LIMIT:
-                                raise ImageAccountSelectionError(
-                                    "capability_unavailable",
-                                    "no account has the required image capability",
-                                )
-                            continue
+                # Capability lists (gif / file_upload) are recorded only after a
+                # *successful* use, so a missing entry means "never verified",
+                # not "unsupported". Treating it as a hard requirement excluded
+                # ~99% of the pool from GIF and image-edit requests and made them
+                # fail with no_available_account even on a 10k healthy pool.
+                # Capabilities stay a soft preference via account scoring
+                # (capability_match_score), and a genuinely unsupported account
+                # surfaces as a normal upstream failure that is retried.
                 account_attempt_started = account_wait_started
                 fallback_retry_pending = False
                 fallback_retry_used = False

@@ -7,6 +7,45 @@
 
 > 更新时间精确到分钟；历史条目按镜像构建时间回填，缺少构建记录的旧版本分钟位记为 00:00。
 
+## [1.9.18] 2026-11-16 03:55
+
+修复 GIF / 图生图请求大量报 `no_available_account` 的根因：把"未验证"误判为"不支持"。
+
+### 背景
+
+运营机持续出现 `The image generation tool encountered an error. Please try again.`（503 / `no_available_account`）。实测池中能力分布：
+
+```
+总账号 10186
+file_upload      7790
+gif               323
+gif + file_upload 113   ← 仅 1.1%
+```
+
+### 根因
+
+`image_capabilities` 只在**成功生成后**才写入（`account_scoring.record_image_result`），所以"没有 gif 记录"只代表该账号从未被要求生成过 GIF，不代表它不支持。但代码把缺失记录当成硬性不支持：
+
++ `conversation.py` 对 `gif` / `file_upload` 做硬性校验，缺失即释放账号并重新选号；
++ `account_service._acquire_next_candidate_token()` 同样按能力硬过滤候选；
++ `_require_hard_capability()` 在"无账号声明该能力"时直接抛错。
+
+结果：GIF / 图生图请求被限制在 113 个账号里，其余 10073 个健康账号被永久排除，池子实际被压缩到 1.1%，表现为大量 503。
+
+这与 `account_scoring.capability_match_score()` 的设计矛盾——那里明确注释"未知能力是偏好不是硬过滤，新池子仍应能服务请求"。
+
+### 修复
+
++ 移除 `conversation.py` 中 `gif` / `file_upload` 的后置硬校验及其计数/放弃逻辑。
++ 移除 `_acquire_next_candidate_token()` 的候选能力过滤与 `capability_skipped` 机制。
++ 移除 `_require_hard_capability()` 前置硬性检查。
++ 能力继续通过 `capability_match_score()` 作为**软偏好**参与打分（有记录的账号优先），真实不支持的上游错误照常进入既有失败/重试流程。
+
+### 验证
+
++ Python 全量：662 passed，1 skipped。
++ 重写 `tests/test_capability_selection.py`：锁定"能力不得排除候选"的语义（缺失 gif 记录仍可选、无能力账号仍可用、不泄漏图片槽位、有记录者打分更高）。
+
 ## [1.9.17] 2026-11-16 03:50
 
 补齐能力过滤对 token 别名的识别。
