@@ -473,6 +473,12 @@ _GIF_PROMPT_RE = re.compile(
     r"(?i)(\bgif\b|动图|动态图|动态图片|循环动画|animated\s+gif|gif\s+animation)"
 )
 
+# Selection filters candidates on hard capabilities (gif / file_upload), so this
+# post-filter only catches accounts whose capability record changed between the
+# two reads. A low limit keeps an unserviceable request failing in seconds
+# instead of spinning through 100 selections (~80s) before returning 503.
+_CAPABILITY_REJECTION_LIMIT = 5
+
 
 def build_image_prompt(prompt: str, size: str | None, quality: str = "auto") -> str:
     hints = []
@@ -2343,7 +2349,13 @@ def _generate_single_image(
                         if missing:
                             capability_rejections += 1
                             account_service.release_image_slot(token)
-                            if capability_rejections >= 100:
+                            # Selection already filters on hard capabilities, so
+                            # reaching even a handful of rejections means the
+                            # pool genuinely cannot serve this capability. Stop
+                            # early: spinning to 100 rejected each cost ~0.8s of
+                            # selection work and made the request hang for over a
+                            # minute before returning 503.
+                            if capability_rejections >= _CAPABILITY_REJECTION_LIMIT:
                                 raise ImageAccountSelectionError(
                                     "capability_unavailable",
                                     "no account has the required image capability",
