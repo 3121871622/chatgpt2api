@@ -2602,8 +2602,13 @@ class AccountService:
                         int(self._image_inflight.get(access_token, 0)) + 1
                     )
                     if hard_required:
+                        # The leased token can be a rotation alias; resolve it
+                        # under the lock before reading capabilities, otherwise a
+                        # renamed account looks "unknown" and slips through to
+                        # the caller's post-filter.
+                        resolved_token = self._resolve_access_token_locked(access_token)
                         known_capabilities = (
-                            self._accounts.get(access_token) or {}
+                            self._accounts.get(resolved_token) or {}
                         ).get("image_capabilities")
                         if (
                             isinstance(known_capabilities, dict)
@@ -2615,6 +2620,9 @@ class AccountService:
                             # account the caller must reject and re-request.
                             self._release_image_slot_locked(access_token)
                             capability_skipped.add(access_token)
+                            # Also exclude the resolved name so a later lease of
+                            # the same account under a different alias is skipped.
+                            capability_skipped.add(resolved_token)
                             if len(capability_skipped) >= 300:
                                 raise ImageAccountSelectionError(
                                     "capability_unavailable",
