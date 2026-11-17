@@ -30,9 +30,6 @@ jobs:
           fi
           echo "value=${VERSION}" >> "$GITHUB_OUTPUT"
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -47,7 +44,11 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          # amd64 only. The arm64 leg runs the node/npm stages under QEMU and
+          # never finished: runs 16/18/19 all sat in `npm ci` and were cancelled
+          # at the 6h job limit, so 1.9.16/1.9.18/1.9.19 were never published.
+          # Re-add linux/arm64 only through a native arm64 runner.
+          platforms: linux/amd64
           push: true
           tags: |
             ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.value }}
