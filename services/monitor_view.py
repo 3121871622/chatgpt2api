@@ -31,6 +31,9 @@ DIGEST_METRIC_PAIRS = (
     ("查询结果", "poll_request_ms"),
     ("结果处理", "resolve_ms"),
     ("下载", "download_ms"),
+    ("放大", "upscale_ms"),
+    ("转码", "convert_ms"),
+    ("存盘", "store_ms"),
 )
 
 SLOW_METRIC_PAIRS = (
@@ -58,6 +61,9 @@ SLOW_METRIC_PAIRS = (
     ("poll_request_ms", "查询结果"),
     ("resolve_ms", "结果处理"),
     ("download_ms", "下载"),
+    ("upscale_ms", "放大"),
+    ("convert_ms", "转码"),
+    ("store_ms", "存盘"),
     ("response_ms", "响应整理"),
 )
 

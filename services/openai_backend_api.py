@@ -120,6 +120,9 @@ IMAGE_POLL_HIT_SETTLE_SECS = 0.8
 IMAGE_POLL_MISS_BACKOFF_FACTOR = 1.5
 IMAGE_POLL_MISS_BACKOFF_CAP_SECS = 12.0
 IMAGE_POLL_RATE_LIMIT_RETRIES = 2
+# Independent result URLs are fetched in parallel; keep the fan-out small so a
+# single call cannot open dozens of upstream connections at once.
+_IMAGE_DOWNLOAD_WORKERS = 4
 CODEX_RESPONSES_INSTRUCTIONS = (
     "Use the image_generation tool to create exactly one image for the user's request. "
     "Return the generated image result."
@@ -856,12 +859,15 @@ class OpenAIBackendAPI:
                 continue
             if not self.access_token:
                 raise RuntimeError("authenticated upstream account required for image input")
-            uploaded: list[Dict[str, Any]] = []
+            upload_items: list[tuple[str, str]] = []
             for idx, (data, mime) in enumerate(image_inputs, start=1):
                 ext_part = mime.split("/", 1)[1].split("+")[0] if "/" in mime else "png"
                 extension = "jpg" if ext_part == "jpeg" else (ext_part or "png")
                 b64 = base64.b64encode(data).decode("ascii")
-                uploaded.append(self._upload_image(f"data:{mime};base64,{b64}", f"image_{idx}.{extension}"))
+                upload_items.append(
+                    (f"data:{mime};base64,{b64}", f"image_{idx}.{extension}")
+                )
+            uploaded = self._upload_images(upload_items)
             parts: list[Any] = []
             for ref in uploaded:
                 parts.append({
@@ -1413,24 +1419,79 @@ class OpenAIBackendAPI:
 
     def _decode_image_base64(self, image: str) -> bytes:
         """把 base64 图片字符串或本地路径解码成二进制。"""
+        data, _ = self._decode_image_input(image)
+        return data
+
+    def _decode_image_input(self, image: str) -> tuple[bytes, Any]:
+        """Decode a base64 string or local path, also returning the local path.
+
+        Resolving the path once avoids probing the filesystem twice per upload
+        (the caller needs the name for ``file_name`` and the bytes for decode).
+        """
         file_path = self._local_image_path(image)
         if file_path is not None:
-            return file_path.read_bytes()
+            return file_path.read_bytes(), file_path
         payload = image.split(",", 1)[1] if image.startswith("data:") and "," in image else image
-        return base64.b64decode(payload)
+        return base64.b64decode(payload), None
 
-    def _upload_image(self, image: str, file_name: str = "image.png") -> Dict[str, Any]:
+    def _upload_images(self, items: list[tuple[str, str]]) -> list[Dict[str, Any]]:
+        """Upload reference images, one per item, concurrently when there are several.
+
+        Each upload is three sequential round-trips (create file record, PUT to
+        the signed blob URL, mark uploaded), so N reference images used to cost
+        3N serial trips and pushed upload_ms past 25s at p90. Uploads are
+        independent, so they run in parallel with results kept in input order.
+        A single image stays on the plain path with no thread pool.
+        """
+        if not items:
+            return []
+        if len(items) == 1:
+            image, file_name = items[0]
+            return [self._upload_image(image, file_name, self.session)]
+
+        results: list[Dict[str, Any] | None] = [None] * len(items)
+        workers = min(len(items), _IMAGE_DOWNLOAD_WORKERS)
+
+        def _do(position: int) -> None:
+            image, file_name = items[position]
+            session = self._new_download_session()
+            try:
+                results[position] = self._upload_image(image, file_name, session)
+            finally:
+                # Per-call scratch session: close it so curl handles do not
+                # accumulate over the life of the process.
+                try:
+                    session.close()
+                except Exception:
+                    pass
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(_do, position) for position in range(len(items))]
+            first_error: BaseException | None = None
+            for future in futures:
+                try:
+                    future.result()
+                except BaseException as exc:  # noqa: BLE001 - re-raised below
+                    if first_error is None:
+                        first_error = exc
+            if first_error is not None:
+                raise first_error
+        return [item for item in results if item is not None]
+
+    def _upload_image(self, image: str, file_name: str = "image.png", session: Any = None) -> Dict[str, Any]:
         """上传一张 base64 图片，返回底层文件元数据。"""
-        data = self._decode_image_base64(image)
-        local_path = self._local_image_path(image)
+        session = session if session is not None else self.session
+        data, local_path = self._decode_image_input(image)
         if local_path is not None:
             file_name = local_path.name
         file_name = os.path.basename(str(file_name or "image.png"))[:128] or "image.png"
-        image = Image.open(BytesIO(data))
-        width, height = image.size
-        mime_type = Image.MIME.get(image.format, "image/png")
+        # with-block: each upload leaked a PIL decode buffer before, which adds
+        # up quickly on multi-image edits.
+        with Image.open(BytesIO(data)) as probe:
+            width, height = probe.size
+            mime_type = Image.MIME.get(probe.format, "image/png")
         path = "/backend-api/files"
-        response = self.session.post(
+        response = session.post(
             self.base_url + path,
             headers=self._headers(path, {"Content-Type": "application/json", "Accept": "application/json"}),
             json={"file_name": file_name, "file_size": len(data), "use_case": "multimodal", "width": width,
@@ -1439,7 +1500,7 @@ class OpenAIBackendAPI:
         )
         ensure_ok(response, path)
         upload_meta = response.json()
-        response = self.session.put(
+        response = session.put(
             upload_meta["upload_url"],
             headers={
                 "Content-Type": mime_type,
@@ -1456,7 +1517,7 @@ class OpenAIBackendAPI:
         )
         ensure_ok(response, "image_upload", credential_scope="signed_asset")
         path = f"/backend-api/files/{upload_meta['file_id']}/uploaded"
-        response = self.session.post(
+        response = session.post(
             self.base_url + path,
             headers=self._headers(path, {"Content-Type": "application/json", "Accept": "application/json"}),
             data="{}",
@@ -3104,9 +3165,13 @@ class OpenAIBackendAPI:
                     })
                     self._add_image_result_timing("poll_wait_ms", gw_result.get("elapsed_ms") or 0)
                     return gw_file_ids, gw_sed_ids
-            # Gateway returned nothing: reset the budget clock so the Python
-            # poll still gets the full window instead of inheriting a spent one.
+            # Gateway returned nothing: give the Python poll its own window
+            # instead of inheriting a spent one, but never let the two paths
+            # together exceed twice the configured budget (the docstring
+            # promises all sleeps stay within timeout_secs).
+            gw_elapsed = time.monotonic() - started_at
             started_at = time.monotonic()
+            timeout_secs = max(1.0, min(timeout_secs, timeout_secs * 2 - gw_elapsed))
 
         attempt = 0
         miss_streak = 0
@@ -3237,7 +3302,12 @@ class OpenAIBackendAPI:
             task_check_ok = False
             task_query_started = time.perf_counter()
             try:
-                tasks = self._query_backend_tasks(conversation_id=conversation_id, timeout_secs=5.0)
+                tasks = self._query_backend_tasks(
+                    conversation_id=conversation_id,
+                    # Bound by the remaining budget: a fixed 5s call started with
+                    # 0.5s left ran well past the configured deadline.
+                    timeout_secs=max(1.0, min(5.0, _remaining())),
+                )
                 task_count = len(tasks)
                 task_check_ok = True
                 task_probe_failure = None
@@ -3316,7 +3386,12 @@ class OpenAIBackendAPI:
             conversation_query_started = time.perf_counter()
             try:
                 try:
-                    conversation = self._get_conversation(conversation_id)
+                    # Same reasoning as the task query: never let one request
+                    # outlive the polling budget it was given.
+                    conversation = self._get_conversation(
+                        conversation_id,
+                        timeout_secs=max(1.0, min(60.0, _remaining())),
+                    )
                 finally:
                     self._add_image_result_timing(
                         "poll_request_ms",
@@ -3796,61 +3871,130 @@ class OpenAIBackendAPI:
                 sediment_ids.extend(item for item in polled_sediment_ids if item and item not in sediment_ids)
         return self._resolve_image_urls_with_timing(conversation_id, file_ids, sediment_ids)
 
+    def _new_download_session(self) -> Any:
+        """Build a curl_cffi session for one download worker thread.
+
+        ``curl_cffi``'s Session keeps a shared handle and must not be driven
+        from several threads at once, so each concurrent worker gets its own
+        session with the same proxy/verify settings and the same headers as the
+        primary session. Threads are created per call and discarded, so these
+        sessions are cheap and short-lived.
+        """
+        session = requests.Session(**proxy_settings.build_session_kwargs_from_profile(
+            self.proxy_profile,
+            impersonate=self.fp["impersonate"],
+            verify=True,
+        ))
+        session.headers.update(dict(self.session.headers))
+        return session
+
     def download_image_bytes(self, urls: list[str]) -> list[bytes]:
-        images: list[bytes] = []
-        for url in urls:
-            parsed_url = urlparse(url)
-            same_origin = (
-                not parsed_url.netloc
-                or parsed_url.netloc.lower() == urlparse(self.base_url).netloc.lower()
-            )
-            download_headers = (
-                self._headers(parsed_url.path or "/")
-                if same_origin
-                else self._signed_asset_headers()
-            )
-            for attempt in range(2):
+        """Download every result URL, fetching independent images concurrently.
+
+        The plain sequential loop made a multi-image result pay the sum of each
+        image's latency: with ~13% of calls returning more than one URL and
+        single upstream images reaching 20MB+, that added tens of seconds for
+        no reason. Concurrency is bounded and results keep the caller's order;
+        a single URL (the common case) never pays for a thread pool.
+        """
+        if not urls:
+            return []
+        if len(urls) == 1:
+            content = self._download_single_image(urls[0], self.session)
+            return [content] if content else []
+
+        ordered: list[bytes | None] = [None] * len(urls)
+        workers = min(len(urls), _IMAGE_DOWNLOAD_WORKERS)
+
+        def _fetch(position: int, url: str) -> None:
+            session = self._new_download_session()
+            try:
+                ordered[position] = self._download_single_image(url, session)
+            finally:
+                # These sessions are per-call scratch objects; closing them
+                # keeps curl handles from accumulating across requests.
                 try:
-                    response = self.session.get(
-                        url,
-                        headers=download_headers,
-                        timeout=120,
-                    )
-                    ensure_ok(
-                        response,
-                        "image_download",
-                        credential_scope="account" if same_origin else "signed_asset",
-                    )
-                    content = bytes(response.content or b"")
-                    if not content:
-                        if attempt == 0:
-                            logger.warning({
-                                "event": "image_download_retry",
-                                "reason": "empty_response",
-                                "url_host": urlparse(url).netloc,
-                            })
-                            continue
-                        raise ImageDownloadError("image download returned an empty response")
-                    if content not in images:
-                        images.append(content)
-                    break
-                except ImageDownloadError:
-                    raise
-                except Exception as exc:
-                    failure = classify_image_exception(exc)
+                    session.close()
+                except Exception:
+                    pass
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [
+                executor.submit(_fetch, position, url)
+                for position, url in enumerate(urls)
+            ]
+            first_error: BaseException | None = None
+            for future in futures:
+                try:
+                    future.result()
+                except BaseException as exc:  # noqa: BLE001 - re-raised below
+                    if first_error is None:
+                        first_error = exc
+            if first_error is not None:
+                raise first_error
+        images: list[bytes] = []
+        seen_urls: set[str] = set()
+        for position, content in enumerate(ordered):
+            url = urls[position]
+            if content and url not in seen_urls:
+                # Dedupe by URL, not by payload: the same prompt can legitimately
+                # produce two byte-identical images, and comparing 20MB blobs
+                # pairwise was also O(n^2) work.
+                seen_urls.add(url)
+                images.append(content)
+        return images
+
+    def _download_single_image(self, url: str, session: Any) -> bytes:
+        parsed_url = urlparse(url)
+        same_origin = (
+            not parsed_url.netloc
+            or parsed_url.netloc.lower() == urlparse(self.base_url).netloc.lower()
+        )
+        download_headers = (
+            self._headers(parsed_url.path or "/")
+            if same_origin
+            else self._signed_asset_headers()
+        )
+        for attempt in range(2):
+            try:
+                response = session.get(
+                    url,
+                    headers=download_headers,
+                    timeout=120,
+                )
+                ensure_ok(
+                    response,
+                    "image_download",
+                    credential_scope="account" if same_origin else "signed_asset",
+                )
+                content = bytes(response.content or b"")
+                if not content:
                     if attempt == 0:
                         logger.warning({
                             "event": "image_download_retry",
-                            "reason": failure.code,
+                            "reason": "empty_response",
                             "url_host": urlparse(url).netloc,
-                            "error": diagnostic_excerpt(repr(exc), 300),
                         })
                         continue
-                    raise ImageDownloadError(
-                        f"image download failed: {diagnostic_excerpt(exc, 500)}",
-                        failure=failure,
-                    ) from exc
-        return images
+                    raise ImageDownloadError("image download returned an empty response")
+                return content
+            except ImageDownloadError:
+                raise
+            except Exception as exc:
+                failure = classify_image_exception(exc)
+                if attempt == 0:
+                    logger.warning({
+                        "event": "image_download_retry",
+                        "reason": failure.code,
+                        "url_host": urlparse(url).netloc,
+                        "error": diagnostic_excerpt(repr(exc), 300),
+                    })
+                    continue
+                raise ImageDownloadError(
+                    f"image download failed: {diagnostic_excerpt(exc, 500)}",
+                    failure=failure,
+                ) from exc
+        return b""
 
     def stream_conversation(
             self,
@@ -3970,7 +4114,9 @@ class OpenAIBackendAPI:
         if not self.access_token:
             raise RuntimeError("access_token is required for image endpoints")
         self._report_progress("uploading")
-        references = [self._upload_image(image, f"image_{idx}.png") for idx, image in enumerate(images, start=1)]
+        references = self._upload_images(
+            [(image, f"image_{idx}.png") for idx, image in enumerate(images, start=1)]
+        )
         self._report_progress("bootstrapping")
         self._bootstrap()
         self._report_progress("getting_token")

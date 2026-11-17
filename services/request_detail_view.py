@@ -40,6 +40,9 @@ _TIMELINE_STEPS = (
     ("resolve_ms", "解析结果", "resolve", "file ID / 下载地址"),
     ("response_ms", "响应整理", "resolve", "Codex 响应"),
     ("download_ms", "下载图片", "download", "图片文件下载"),
+    ("upscale_ms", "图片放大", "download", "Sharp/Pillow 放大"),
+    ("convert_ms", "格式转码", "download", "output_format 转换"),
+    ("store_ms", "图片存盘", "download", "写入本地或远端存储"),
 )
 
 _TIMELINE_SEGMENTS = (
@@ -59,7 +62,7 @@ _TIMELINE_SEGMENTS = (
         "resolve",
         ("poll_request_ms", "resolve_ms", "response_ms"),
     ),
-    ("download", "图片下载", "download", ("download_ms",)),
+    ("download", "图片下载", "download", ("download_ms", "upscale_ms", "convert_ms", "store_ms")),
 )
 
 _DEFAULT_TIMELINE_WARNING_THRESHOLD_MS = 60_000
@@ -85,6 +88,12 @@ _TIMELINE_WARNING_THRESHOLDS_MS = {
     "poll_wait_ms": 60_000,
     "poll_request_ms": 30_000,
     "download_ms": 60_000,
+    # Measured p50/max: upscale 0/752ms, convert 0/-, store 0/837ms. A 30s
+    # threshold would never fire; these values warn when post-processing starts
+    # to dominate instead.
+    "upscale_ms": 5_000,
+    "convert_ms": 5_000,
+    "store_ms": 5_000,
     "response_ms": 30_000,
 }
 

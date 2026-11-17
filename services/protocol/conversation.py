@@ -545,13 +545,34 @@ def format_image_result(
     deadline_monotonic: float | None = None,
     output_format: str = "",
     output_compression: int | None = None,
+    timing: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     prepared: list[tuple[dict[str, Any], bytes, str]] = []
     for item in items:
         b64_json = str(item.get("b64_json") or "").strip()
         if not b64_json:
             continue
-        image_bytes = base64.b64decode(b64_json)
+        # Upstream occasionally ships a data: prefix or a truncated payload. A
+        # bare decode raised binascii.Error for the whole batch, discarding the
+        # images that had already decoded (and orphaned any files saved before
+        # the failure). Skip the unreadable item and keep the rest.
+        payload = b64_json.split(",", 1)[1] if b64_json.startswith("data:") and "," in b64_json else b64_json
+        try:
+            image_bytes = base64.b64decode(payload, validate=False)
+        except Exception as exc:
+            logger.warning({
+                "event": "image_result_decode_failed",
+                "length": len(b64_json),
+                "error": diagnostic_excerpt(repr(exc), 300),
+            })
+            continue
+        if not image_bytes:
+            logger.warning({
+                "event": "image_result_decode_failed",
+                "length": len(b64_json),
+                "error": "empty payload",
+            })
+            continue
         prepared.append((item, image_bytes, image_mime_type(image_bytes)))
     # Images 2.6 GIF turns return the animated GIF plus a high-resolution PNG
     # cover. The cover is not a second requested image; returning it makes
@@ -562,21 +583,30 @@ def format_image_result(
 
     data: list[dict[str, Any]] = []
     image_urls: list[str] = []
+    upscale_ms = 0
+    convert_ms = 0
+    store_ms = 0
     for item, image_bytes, mime_type in prepared:
         revised_prompt = str(item.get("revised_prompt") or prompt).strip() or prompt
+        stage_started = time.perf_counter()
         image_bytes = upscale_image_if_needed(image_bytes, requested_size)
+        upscale_ms += _elapsed_ms(stage_started)
         if output_format:
+            stage_started = time.perf_counter()
             image_bytes = convert_image_output(
                 image_bytes,
                 output_format,
                 output_compression,
             )
+            convert_ms += _elapsed_ms(stage_started)
         mime_type = image_mime_type(image_bytes)
+        stage_started = time.perf_counter()
         stored_url = save_image_bytes(
             image_bytes,
             base_url,
             deadline_monotonic=deadline_monotonic,
         )
+        store_ms += _elapsed_ms(stage_started)
         if stored_url:
             image_urls.append(stored_url)
         asset: dict[str, Any] = {
@@ -594,6 +624,17 @@ def format_image_result(
     result: dict[str, Any] = {"created": created or int(time.time()), "data": data}
     if image_urls:
         result["_image_urls"] = image_urls
+    if timing is not None:
+        # Populate only when the caller asked for it: these three stages ran a
+        # node subprocess and full-image encode/write per image, which used to
+        # be invisible to the monitor and made the stage sum fall short of
+        # stream_ms by up to 27s with no explanation.
+        if upscale_ms:
+            timing["upscale_ms"] = upscale_ms
+        if convert_ms:
+            timing["convert_ms"] = convert_ms
+        if store_ms:
+            timing["store_ms"] = store_ms
     if message and not data:
         result["message"] = message
     return result
@@ -1789,6 +1830,7 @@ def _image_result_output_from_urls(
         {"b64_json": base64.b64encode(image_data).decode("ascii")}
         for image_data in downloaded_images
     ]
+    post_timing: dict[str, int] = {}
     formatted = format_image_result(
         image_items,
         request.prompt,
@@ -1799,7 +1841,25 @@ def _image_result_output_from_urls(
         deadline_monotonic=request.deadline_monotonic or None,
         output_format=request.output_format,
         output_compression=request.output_compression,
+        timing=post_timing,
     )
+    if post_timing:
+        _monitor_image_stage(
+            request,
+            "image_postprocess_done",
+            conversation_id=conversation_id,
+            index=index,
+            total=total,
+            image_count=len(downloaded_images),
+            **post_timing,
+        )
+        logger.info({
+            "event": "image_postprocess_done",
+            "call_id": request.call_id,
+            "conversation_id": conversation_id,
+            "image_count": len(downloaded_images),
+            **post_timing,
+        })
     data = formatted["data"]
     if not data:
         return None

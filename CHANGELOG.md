@@ -7,6 +7,78 @@
 
 > 更新时间精确到分钟；历史条目按镜像构建时间回填，缺少构建记录的旧版本分钟位记为 00:00。
 
+## [1.9.19] 2026-11-17 12:20
+
+修复图片链路的多处串行瓶颈与 8 个真实缺陷，并把放大/转码/存盘的耗时纳入监控。
+
+> 性能部分的定位需要说明：实测后处理（放大+存盘 < 1.6 秒）不是瓶颈，真正的耗时
+> 在上游生成（p50 23.8 秒）。下列并发改造的价值在于「并发时不再互相阻塞」和
+> 「多图请求不再付串行之和」，而非缩短单图的关键路径。
+
+### 背景：耗时到底花在哪
+
+对运营机最近 50 笔成功调用做阶段拆解（单位 ms）：
+
+| 阶段 | p50 | p90 | max |
+|---|---|---|---|
+| 总耗时 | 38,101 | 72,513 | 104,712 |
+| 上游生成 conv_stream | 22,812 | 42,224 | 62,606 |
+| ├ SSE 流 | 14,611 | 15,028 | 30,066 |
+| └ 等待结果轮询 | 3,039 | 12,310 | 29,473 |
+| 上传参考图 | 4,367 | **24,963** | 38,444 |
+| 下载出图 | 3,355 | **19,129** | 32,793 |
+
+**结论：耗时主要在上游生成，后处理占比很小。** 1.9.19 上线后用真实埋点复核 12 笔（ms）：
+
+| 阶段 | p50 | max |
+|---|---|---|
+| `conversation_stream_ms` | 23,787 | 37,146 |
+| `download_ms` | 2,583 | 5,357 |
+| `upscale_ms` | 0 | 752 |
+| `store_ms` | 0 | 837 |
+
+即后处理（放大+存盘）合计不到 1.6 秒，不是瓶颈。按正确口径再算残差
+`stream_ms - 外层各阶段之和`：**p50 = -3,484ms，max = +3,735ms**，基本为零 ——
+说明各阶段已完整覆盖耗时，不存在未计量的黑洞。
+
+> 更正：本条目初稿曾称「未计量部分最高 26.8 秒，实测就是放大+转码+存盘」。
+> 该结论错误 —— 当时把 `poll_wait_ms` / `poll_request_ms` 也当作独立阶段扣减，
+> 而这两项本就嵌套在 `conversation_stream_ms` 内部，重复扣减制造了虚假缺口。
+> 新增的埋点正是用来自证这一点的，故保留更正记录。
+
+### 串行瓶颈（性能）
+
+1. **下载逐张串行**：`download_image_bytes` 是普通 for 循环，多图请求付各张之和。实测 `url_count` 分布为 1:789 / 2:120 / 3:24，约 13% 的调用是多图。改为有界并发（最多 4 个 worker），结果保持输入顺序，单图仍走无线程池的快路径。
+2. **一张参考图 3 次串行往返**：`_upload_image` 依次 POST 建文件记录 → PUT 到签名 Blob URL → POST 标记 uploaded，且多图之间也是串行推导。新增 `_upload_images()` 并行处理多图，这正是 `upload_ms` p90 达 25s 的原因。
+3. **放大用全局锁**：`_UPSCALE_LOCK = threading.Lock()` 使整个服务同时只有一张图能放大，且每次都要 spawn 一个 node 子进程。改为 `BoundedSemaphore(4)`（可用 `QINGMENG_UPSCALE_CONCURRENCY` 调整），并发有界但不再互相阻塞。
+4. **无埋点**：`format_image_result` 内放大/转码/存盘三段完全没有计时。新增 `upscale_ms` / `convert_ms` / `store_ms` 三个指标，贯通 monitor_contract、realtime_monitor、monitor_view、request_detail_view。
+
+### 缺陷修复
+
+5. **宽高比误判（变形）**：`upscale_image_if_needed` 用 `source[0] >= target[0] and source[1] >= target[1]` 判断是否需要放大。源 1672x941 请求 1024x1024 时高度 941 < 1024，于是被强制拉伸成正方形 —— 既变形又白跑一次 node 子进程。改为按像素总量比较（`_needs_upscale`）。日志中确有此类记录。
+6. **EXIF 旋转坐标系不一致**：判断尺寸用未旋转的原始尺寸，`_pillow_lanczos` 却先 `exif_transpose` 再缩放，orientation=5..8 时两个坐标系颠倒。新增 `_oriented_size()`，只读 EXIF tag（`Image.open` 惰性，不解码像素）。
+7. **JPEG 透明区变黑**：放大路径对 RGBA 直接 `convert("RGB")`，而 `convert_image_output` 会先贴白底。导致同一张图是否被放大决定了背景色。统一为白底合成。
+8. **`b64decode` 无保护**：上游偶发返回带 `data:` 前缀或截断的 payload 时抛 `binascii.Error`，整批失败，且此前已 `save_image_bytes` 的图片成为孤儿文件。改为单条 try/except + 剥离 data: 前缀。
+9. **按内容去重吞图**：`if content not in images` 用 bytes 等值去重，同 prompt 确定性输出两张相同图时 n=2 只返回 1 张，且 8MB 图两两全量比较。改为按 URL 去重。
+10. **partial 回调全表落盘**：`image_result_callback` 每次（n 张图就是 n 次）在 `self._lock` 内重写整个 `image_tasks.json` 及其 `.bak`，且 payload 含 base64。改为 `persist=False`，只有终态落盘。
+11. **轮询预算被放大**：Go gateway 轮询耗尽预算返回空后重置时钟，使 `timeout_secs=120` 实际可达 240s；轮询内层 `_query_backend_tasks(5.0)` 与 `_get_conversation(60)` 使用固定超时，只管在轮次开头检查剩余，可超出预算 65s。两处都改为 `min(固定值, _remaining())`，并对 gateway 路径设总预算上限。
+12. **PIL 缓冲泄漏**：`_upload_image` 中 `Image.open()` 未关闭，且 `_local_image_path` 被解析两次。改为 with 块 + `_decode_image_input()` 一次性返回数据与路径。
+
+### 并发安全
+
+`curl_cffi` 的 Session 内部持有共享句柄，不能跨线程驱动。并发路径为每个 worker 新建独立 session（同代理/校验设置、同 header），用后立即 `close()`，避免句柄累积。
+
+### 验证
+
++ 全量测试 **674 passed / 1 skipped**（新增 12 个测试：并发下载保序、并发上传保序、session 关闭、单图不启线程池、失败传播、像素预算判定、宽高比不变形、信号量类型）
++ 版本号统一为 1.9.19：`VERSION` / `pyproject.toml` / `web-vue/package.json` / `docker-compose.yml` / `docker-compose.qingmeng.yml` / `uv.lock`
+
+### 未采纳的排查建议
+
++ **MIME 兜底返回 `image/png`**（BMP/TIFF 会被当成 PNG 存储与转码）—— 改动面覆盖存储扩展名、`content_type`、`convert_image_output` 的相等性判断，需要独立设计，本轮不动。
++ **GIF 裁剪按"只要有 GIF 就丢弃全部非 GIF"** —— 现行为是为 n=1 时丢掉 2.6 的 PNG 封面，改成按数量判断可能让封面重新计费，需要与上游行为对齐后再改。
++ **部分 URL 解析成功就吞掉失败** —— 需要引入"部分成功"语义到 `ImageOutput`，属于契约变更，留待后续。
+
 ## [1.9.18] 2026-11-16 03:55
 
 修复 GIF / 图生图请求大量报 `no_available_account` 的根因：把"未验证"误判为"不支持"。

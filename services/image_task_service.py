@@ -750,7 +750,12 @@ class ImageTaskService:
         def image_result_callback(data: list[dict[str, Any]]) -> None:
             partial_data = [dict(item) for item in data if isinstance(item, dict)]
             if partial_data:
-                self._update_task(key, data=partial_data)
+                # persist=False: the callback fires once per finished image and
+                # carries base64 payloads, so persisting here rewrote the whole
+                # task table (plus its .bak) under the lock for every image.
+                # A partial result is recoverable — it is re-read from upstream
+                # — so only terminal states need to reach disk.
+                self._update_task(key, persist=False, data=partial_data)
         # 将进度回调添加到 payload 中（handler 会提取并传递给 ConversationRequest）
         payload_with_progress = {
             **payload,
