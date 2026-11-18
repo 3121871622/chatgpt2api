@@ -135,10 +135,16 @@ class ProxyHealthRegistry:
         error: object = "",
         *,
         label: str = "",
+        failure_threshold: int | None = None,
     ) -> None:
         normalized = str(key or "").strip()
         if not normalized:
             return
+        threshold = (
+            max(1, int(failure_threshold))
+            if failure_threshold is not None
+            else self._failure_threshold
+        )
         with self._lock:
             entry = self._entry(normalized, label)
             now = self._clock()
@@ -146,8 +152,8 @@ class ProxyHealthRegistry:
             entry.total_failures += 1
             entry.last_fail_at = now
             entry.last_error = str(error or "")[:300]
-            if entry.consecutive_failures >= self._failure_threshold:
-                over = entry.consecutive_failures - self._failure_threshold
+            if entry.consecutive_failures >= threshold:
+                over = entry.consecutive_failures - threshold
                 cooldown = min(
                     self._max_cooldown,
                     self._base_cooldown * (2 ** min(over, 6)),

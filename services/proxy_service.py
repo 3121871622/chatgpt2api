@@ -27,6 +27,16 @@ from services.storage.configuration_repository import (
     proxy_configuration_repository,
 )
 
+# Stream breakage is a weaker egress signal than a dead connection: the same
+# 7-10% SSE interruption rate was measured on every node of the image egress
+# group, so cooling a node down after 3 breaks made all five flap together.
+# Five consecutive breaks still takes a genuinely bad node out of rotation.
+EGRESS_STREAM_FAILURE_CODES = frozenset({
+    "image_stream_interrupted",
+    "image_stream_timeout",
+})
+EGRESS_STREAM_FAILURE_THRESHOLD = 5
+
 
 FlareSolverrRequestMethod = Callable[[str, bytes, dict[str, str], float], bytes]
 
@@ -529,7 +539,17 @@ class ProxySettingsStore:
         if code and code not in EGRESS_FAILURE_CODES:
             # Account/quota failures say nothing about the egress.
             return
-        proxy_health.report_failure(key, error, label=label)
+        threshold = (
+            EGRESS_STREAM_FAILURE_THRESHOLD
+            if code in EGRESS_STREAM_FAILURE_CODES
+            else None
+        )
+        proxy_health.report_failure(
+            key,
+            error,
+            label=label,
+            failure_threshold=threshold,
+        )
 
     def proxy_health_snapshot(self) -> dict[str, object]:
         return proxy_health.snapshot()

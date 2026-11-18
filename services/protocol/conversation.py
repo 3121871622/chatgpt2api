@@ -1642,6 +1642,21 @@ def _recover_after_image_stream_timeout(
     }
     if is_timeout:
         followup["timeout_secs"] = config.image_stream_timeout_secs
+    # A stream break is evidence about the egress path (image proxy node or the
+    # upstream edge), not about the account. Report it to the egress health
+    # registry here because the recovery below often still delivers the image:
+    # without this the success path reports ok=True and resets the node's
+    # consecutive failures, so a flaky proxy never cools down.
+    proxy_settings.report_egress_result(
+        getattr(backend, "proxy_profile", None),
+        ok=False,
+        error=raw_error,
+        failure_code=failure_code,
+    )
+    try:
+        setattr(backend, "_egress_stream_recovered", True)
+    except Exception:  # noqa: BLE001 - backend may be a slotted test double
+        pass
     stream_failure = last.get("_image_failure")
     stream_failure = stream_failure if isinstance(stream_failure, ImageFailure) else None
     task_failure: ImageFailure | None = None
@@ -2925,10 +2940,11 @@ def _generate_single_image(
                     "image_count": len(result_images),
                     "result_images": result_images,
                 })
-            proxy_settings.report_egress_result(
-                getattr(backend, "proxy_profile", None),
-                ok=True,
-            )
+            if not getattr(backend, "_egress_stream_recovered", False):
+                proxy_settings.report_egress_result(
+                    getattr(backend, "proxy_profile", None),
+                    ok=True,
+                )
             return outputs
         except Exception as exc:
             failure = (
