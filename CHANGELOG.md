@@ -7,6 +7,35 @@
 
 > 更新时间精确到分钟；历史条目按镜像构建时间回填，缺少构建记录的旧版本分钟位记为 00:00。
 
+## [1.9.24] 2026-11-19 04:20
+
+修复并发请求下账号选择被 OAuth 刷新竞态误判为「无可用账号」而返回 503 的问题；选号失败日志补齐失败原因统计。
+
+### 背景（11/19 凌晨批量提交时的 503）
+
+- 03:47–03:53 批量提交图片请求时，10 笔请求在 0.1–2.7 秒内返回 `503 no_available_account`；
+- 容器内复现：连续 12 次选号有 4 次失败（日志 `attempts=12, remote_checks 2–4, cache_hits=0`）；
+- 定位：失败候选走完整远程校验 `fetch_remote_info` 的刷新预检时抛出
+  `RefreshCredentialsChangedError('OAuth refresh credentials changed during refresh.')`
+  —— 同一账号被并发请求 / 令牌刷新器同时刷新，凭据版本变化被当成「账号不可用」丢弃，
+  4 轮候选全部撞上后返回 503。**属系统侧问题，并发越高越容易触发。**
+
+### 修复
+
+- [修复] 选号遇到 `RefreshCredentialsChangedError` 不再丢弃候选：解析最新 access token、租用其图片槽位并做一次轻量 `/me` 校验，成功即返回该账号（`_recover_after_refresh_race`）。
+- [修复] 轻量探测路径同样处理刷新竞态，避免 `/me` 探测期间发生的凭据轮换被当作账号失效。
+- [优化] `image_account_selection_failed` 日志新增 `reasons` 字段（按异常类型计数），后续可直接区分「账号失效 / 刷新竞态 / 上游超时」。
+
+### 失败分类结论（11/19 00:00–04:00 实测）
+
+- `task_interrupted` 12 笔、`image_poll_timeout` 2 笔：上游生成长尾（`raw_error=image request deadline exceeded before asset storage`），按规则只记录；
+- `no_available_account` 20 笔：本次定位的系统侧刷新竞态，本版修复；
+- 慢请求（>120s 共 14 笔）：全部带 `stream_error_ms` 69–121s + `poll_wait_ms` 41–55s，属上游 SSE 断流与结果落盘长尾，非本机。
+
+### 验证
+
+- 新增 `tests/test_selection_refresh_race.py`（3 用例：竞态恢复返回新 token、无新 token 时放弃、探测失败时释放新槽位）
+
 ## [1.9.23] 2026-11-19 03:20
 
 修复更新中心在「宿主机 UTC / 应用容器 Asia/Shanghai」时区不一致时，把在线的宿主机更新代理误判为离线（表现为「宿主机更新代理未就绪，一键更新不可用」）。

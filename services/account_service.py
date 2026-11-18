@@ -2485,6 +2485,32 @@ class AccountService:
             executor.shutdown(wait=False, cancel_futures=True)
         return winner, failures
 
+    def _recover_after_refresh_race(self, access_token: str) -> str | None:
+        """Keep a candidate whose OAuth credentials were rotated mid-selection.
+
+        ``RefreshCredentialsChangedError`` means another worker refreshed the
+        account between our credential snapshot and the refresh preflight; the
+        account itself is healthy. Resolve the newest access token, lease its
+        image slot (the old token's slot is released) and confirm liveness with
+        one cheap ``/me`` probe. Returns the newest usable token or ``None``.
+        """
+        latest_token = str(self.resolve_access_token(access_token) or "").strip()
+        self.release_image_slot(access_token)
+        if not latest_token or latest_token == access_token:
+            # No newer token appeared yet (or the account vanished): let the
+            # selection loop lease another candidate.
+            return None
+        with self._image_slot_condition:
+            self._image_inflight[latest_token] = (
+                int(self._image_inflight.get(latest_token, 0)) + 1
+            )
+        try:
+            self.probe_access_token_light(latest_token, timeout=5.0)
+        except Exception:
+            self.release_image_slot(latest_token)
+            return None
+        return latest_token
+
     def _acquire_next_candidate_token(
             self,
             excluded_tokens: set[str] | None = None,
@@ -2809,6 +2835,14 @@ class AccountService:
         attempted_tokens: set[str] = set()
         remote_checks = 0
         cache_hits = 0
+        # Diagnostics for the terminal "no available account" warning: knowing
+        # which exception families rejected the candidates is what separates a
+        # dead pool from a transient refresh race (see _recover_after_refresh_race).
+        selection_failures: dict[str, int] = {}
+
+        def count_selection_failure(exc: BaseException | None) -> None:
+            key = type(exc).__name__ if exc is not None else "unknown"
+            selection_failures[key] = selection_failures.get(key, 0) + 1
         # 控制流只保留两个出口，但最终是否能说“额度耗尽”必须谨慎：
         # 只要出现过非额度类失败，就说明不能断言全部账号都耗尽，应返回可重试的 unavailable。
         saw_remote_quota_exhausted = False
@@ -2930,6 +2964,7 @@ class AccountService:
                         )
                 for token, probe_exc in failures.items():
                     saw_unavailable_failure = True
+                    count_selection_failure(probe_exc)
                     self._note_selection_probe_failure(token, probe_exc)
                 for token in candidates:
                     if token != winner:
@@ -3001,12 +3036,27 @@ class AccountService:
             ):
                 try:
                     self.probe_access_token_light(access_token, timeout=5.0)
+                except RefreshCredentialsChangedError as probe_exc:
+                    # Same race as the full-fetch path: the credential rotated
+                    # mid-probe. Recover with the newest token instead of
+                    # dropping the candidate.
+                    count_selection_failure(probe_exc)
+                    recovered = self._recover_after_refresh_race(access_token)
+                    if recovered:
+                        return recovered
+                    if time.monotonic() >= selection_deadline:
+                        raise ImageAccountSelectionError(
+                            "unavailable",
+                            "image account selection timed out during remote validation",
+                        )
+                    continue
                 except Exception as probe_exc:
                     # A failed light probe used to fall through to a full
                     # fetch_remote_info (up to 8s more) on the same account,
                     # so one dead candidate cost ~13s of the customer's wait.
                     # Move on instead; a real 401 still goes through the
                     # normal invalid-token path so the account is removed.
+                    count_selection_failure(probe_exc)
                     saw_unavailable_failure = True
                     detail = str(probe_exc or "")
                     if any(
@@ -3039,9 +3089,38 @@ class AccountService:
                     image_scope=True,
                     request_timeout=8.0,
                 )
-            except Exception:
+            except RefreshCredentialsChangedError:
+                # A concurrent worker (another request or the token watcher)
+                # rotated this account's OAuth credentials between our snapshot
+                # and the refresh preflight. That is a race, not a dead account:
+                # the newest token is normally already usable, so validate it
+                # with one cheap /me probe and keep the candidate. Before this
+                # recovery a burst of concurrent requests turned the races into
+                # 503 no_available_account failures.
+                count_selection_failure(RefreshCredentialsChangedError("refresh_race"))
+                recovered = self._recover_after_refresh_race(access_token)
+                if recovered:
+                    wait_ms = int((time.monotonic() - selection_started) * 1000)
+                    if wait_ms >= 2000:
+                        logger.info({
+                            "event": "image_account_selected",
+                            "wait_ms": wait_ms,
+                            "attempts": len(attempted_tokens),
+                            "remote_checks": remote_checks,
+                            "cache_hits": cache_hits,
+                            "source": "refresh_race_recovery",
+                        })
+                    return recovered
+                if time.monotonic() >= selection_deadline:
+                    raise ImageAccountSelectionError(
+                        "unavailable",
+                        "image account selection timed out during remote validation",
+                    )
+                continue
+            except Exception as exc:
                 # 预检失败（上游波动/网络/401 等）：这个号这次不可用，换下一个。
                 # 401 已在 fetch_remote_info 内部走异常处理，这里不再二次分类。
+                count_selection_failure(exc)
                 saw_unavailable_failure = True
                 self.release_image_slot(access_token)
                 if time.monotonic() >= selection_deadline:
@@ -3091,6 +3170,7 @@ class AccountService:
             "remote_checks": remote_checks,
             "cache_hits": cache_hits,
             "quota_exhausted": saw_remote_quota_exhausted and not saw_unavailable_failure,
+            "reasons": dict(selection_failures),
         })
         if saw_remote_quota_exhausted and not saw_unavailable_failure:
             raise ImageAccountSelectionError(
