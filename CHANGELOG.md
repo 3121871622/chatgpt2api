@@ -7,7 +7,20 @@
 
 > 更新时间精确到分钟；历史条目按镜像构建时间回填，缺少构建记录的旧版本分钟位记为 00:00。
 
-## [1.9.24] 2026-11-19 04:20
+## [1.9.25] 2026-11-19 04:10
+
+修复 1.9.24 刷新竞态分支的构造参数错误（`RefreshCredentialsChangedError` 不接受位置参数），该错误会让选号直接抛内部 TypeError，仍表现为 `no_available_account`。
+
+### 修复
+
+- [修复] 选号刷新竞态分支改为用捕获到的异常对象计数（原写法 `RefreshCredentialsChangedError("refresh_race")` 触发 `__init__() takes 1 positional argument but 2 were given`，被外层捕获后返回「image account selection failed internally (TypeError)」）。
+- [修复] 该分支现在能真正走到 `_recover_after_refresh_race`：解析最新 token → 轻量 `/me` 校验 → 继续使用该账号。
+
+### 验证
+
+- 容器内连续 12 次选号压测：1.9.24 出现 8 次内部 TypeError；1.9.25 修复后 0 失败（发布后回填）。
+
+## [1.9.24] 2026-11-19 04:00
 
 修复并发请求下账号选择被 OAuth 刷新竞态误判为「无可用账号」而返回 503 的问题；选号失败日志补齐失败原因统计。
 

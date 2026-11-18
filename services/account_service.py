@@ -3089,7 +3089,7 @@ class AccountService:
                     image_scope=True,
                     request_timeout=8.0,
                 )
-            except RefreshCredentialsChangedError:
+            except RefreshCredentialsChangedError as refresh_exc:
                 # A concurrent worker (another request or the token watcher)
                 # rotated this account's OAuth credentials between our snapshot
                 # and the refresh preflight. That is a race, not a dead account:
@@ -3097,7 +3097,7 @@ class AccountService:
                 # with one cheap /me probe and keep the candidate. Before this
                 # recovery a burst of concurrent requests turned the races into
                 # 503 no_available_account failures.
-                count_selection_failure(RefreshCredentialsChangedError("refresh_race"))
+                count_selection_failure(refresh_exc)
                 recovered = self._recover_after_refresh_race(access_token)
                 if recovered:
                     wait_ms = int((time.monotonic() - selection_started) * 1000)
