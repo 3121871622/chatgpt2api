@@ -3032,13 +3032,17 @@ class AccountService:
                 )
                 for token in candidates
             ]
-            if _gw.is_enabled() and self._gateway_selection_trusted():
-                # Trust the gateway's ready index: a burst of concurrent image
-                # requests otherwise probes /backend-api/me for every lease and
-                # turns into 401s / refresh races (measured: 8/8 concurrent
-                # requests got 503 no_available_account even though the pool had
-                # 10k healthy accounts). Local status/capability screening only;
-                # dead credentials surface in the per-attempt retry instead.
+            if self._gateway_selection_trusted():
+                # Skip live /me probes entirely and trust the local account
+                # index to screen candidates. Concurrent image requests
+                # otherwise probe /backend-api/me for every lease and turn
+                # into 401s / refresh races (measured: 8/8 concurrent requests
+                # returned 503 no_available_account with a 10k-account pool).
+                # This path is independent of whether the Go gateway is running:
+                # the local index is the source of truth; dead credentials
+                # surface as per-attempt failures that the cross-account retry
+                # already handles. Set QINGMENG_IMAGE_SELECTION_TRUST_GATEWAY=0
+                # to restore the full live-validation path.
                 ordered_trusted = [
                     token
                     for _, token in sorted(scored, key=lambda item: item[0], reverse=True)
@@ -3129,6 +3133,22 @@ class AccountService:
                             ),
                             None,
                         )
+                # For probe failures caused by an in-flight credential
+                # rotation (RefreshCredentialsChangedError) attempt recovery
+                # before discarding the candidate: the account is healthy, the
+                # token store just hasn't committed the new AT yet.  Other
+                # failure types are handled by _note_selection_probe_failure.
+                if winner is None:
+                    for token, probe_exc in list(failures.items()):
+                        if not isinstance(probe_exc, RefreshCredentialsChangedError):
+                            continue
+                        recovered = self._recover_after_refresh_race(
+                            token, deadline_monotonic=selection_deadline
+                        )
+                        if recovered:
+                            winner = recovered
+                            del failures[token]
+                            break
                 for token, probe_exc in failures.items():
                     saw_unavailable_failure = True
                     count_selection_failure(probe_exc)

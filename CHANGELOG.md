@@ -7,6 +7,26 @@
 
 > 更新时间精确到分钟；历史条目按镜像构建时间回填，缺少构建记录的旧版本分钟位记为 00:00。
 
+## [1.9.29] 2026-11-19 05:10
+
+**彻底修复并发批量请求下的 503 no_available_account 根本原因。**
+
+### 根因分析（调试日志实证）
+
+- 生产容器未设置 `GATEWAY_TOKEN`，`gateway.is_enabled()=False`，1.9.27/28 的「信任路径」从未生效（全天只触发 4 次）
+- 失败全部是 `RefreshCredentialsChangedError:4, remote_checks:0` → 走的是**并行轻量探测**路径，token 刷新竞态在探测里抛出，该路径没有任何恢复逻辑
+- `image_auth_token_retry: 0` → 1.9.28 新重试代码从未执行（失败在选号阶段，未到生图阶段）
+
+### 修复（两处，均在 account_service.py）
+
+- [修复] **信任路径去掉对 `gateway.is_enabled()` 的依赖**：本地账号状态筛选不需要 Go gateway 运行，直接用本地 index 判断候选是否可用；`QINGMENG_IMAGE_SELECTION_TRUST_GATEWAY=0` 可回退到全量验证路径
+- [修复] **并行探测失败里对 `RefreshCredentialsChangedError` 做恢复**：所有探测路径（包括 `remote_checks=0` 的并行探测）遇到刷新竞态时调用 `_recover_after_refresh_race`，等待并重新解析最新 token 再返回，而不是直接丢弃候选
+
+### 验证
+
+- 全量测试 704 用例：703 通过 / 1 跳过
+- 给 test_account_selection_cache.py / test_account_selection_deadline.py 加 autouse fixture 显式禁用信任路径，确保验证路径测试不被绕过
+
 ## [1.9.28] 2026-11-19 05:10
 
 修复 1.9.27「信任网关租约」后暴露的 `401 auth_invalid / token_revoked`：被上游吊销的旧 access token 不再直接透传给客户端。

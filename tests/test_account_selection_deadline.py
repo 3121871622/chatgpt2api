@@ -22,6 +22,13 @@ from services.upstream_circuit import upstream_circuit
 STALE = "2020-01-01T00:00:00+00:00"
 
 
+@pytest.fixture(autouse=True)
+def _disable_gateway_trust(monkeypatch):
+    """Force live-validation path so deadline tests are not bypassed."""
+    monkeypatch.setenv("QINGMENG_IMAGE_SELECTION_TRUST_GATEWAY", "0")
+    monkeypatch.setattr(account_module._gw, "is_enabled", lambda: False)
+
+
 def _account(token: str, **overrides) -> dict:
     account = {
         "access_token": token,
