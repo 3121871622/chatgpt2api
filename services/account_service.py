@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import random
 import time
 from collections import deque
@@ -2441,6 +2442,42 @@ class AccountService:
             except Exception:
                 pass
 
+    @staticmethod
+    def _gateway_selection_trusted() -> bool:
+        raw = str(os.getenv("QINGMENG_IMAGE_SELECTION_TRUST_GATEWAY") or "1").strip().lower()
+        return raw not in {"0", "false", "no", "off"}
+
+    def _local_candidate_usable(
+            self,
+            token: str,
+            plan_type: str | None,
+            plan_types: set[str] | tuple[str, ...] | None,
+            source_type: str | None,
+    ) -> bool:
+        """Network-free candidate screen for gateway-trusted selection.
+
+        The Go gateway already maintains the ready index; re-validating every
+        lease with a live ``/backend-api/me`` call turns a burst of concurrent
+        image requests into a probe storm (401 responses and refresh races) and
+        ends in ``503 no_available_account``. When
+        ``QINGMENG_IMAGE_SELECTION_TRUST_GATEWAY`` is on (default) the lease is
+        accepted after these local checks only, and a genuinely dead credential
+        surfaces as a normal per-attempt failure that the existing
+        cross-account retry already handles.
+        """
+        account = self.get_account(token) or {}
+        if not account:
+            return False
+        if str(account.get("last_remote_check_result") or "").strip().lower() == "invalid":
+            return False
+        if str(account.get("status") or "").strip() in {"禁用", "异常"}:
+            return False
+        return (
+            self._account_matches_plan_type(account, plan_type)
+            and self._account_matches_any_plan_type(account, plan_types)
+            and self._account_matches_source_type(account, source_type)
+        )
+
     def _probe_candidates_parallel(
             self,
             tokens: list[str],
@@ -2986,6 +3023,43 @@ class AccountService:
                 )
                 for token in candidates
             ]
+            if _gw.is_enabled() and self._gateway_selection_trusted():
+                # Trust the gateway's ready index: a burst of concurrent image
+                # requests otherwise probes /backend-api/me for every lease and
+                # turns into 401s / refresh races (measured: 8/8 concurrent
+                # requests got 503 no_available_account even though the pool had
+                # 10k healthy accounts). Local status/capability screening only;
+                # dead credentials surface in the per-attempt retry instead.
+                ordered_trusted = [
+                    token
+                    for _, token in sorted(scored, key=lambda item: item[0], reverse=True)
+                ]
+                trusted_winner = next(
+                    (
+                        token
+                        for token in ordered_trusted
+                        if self._local_candidate_usable(
+                            token, plan_type, plan_types, source_type
+                        )
+                    ),
+                    None,
+                )
+                if trusted_winner:
+                    for token in candidates:
+                        attempted_tokens.add(token)
+                        if token != trusted_winner:
+                            self.release_image_slot(token)
+                    wait_ms = int((time.monotonic() - selection_started) * 1000)
+                    if wait_ms >= 2000:
+                        logger.info({
+                            "event": "image_account_selected",
+                            "wait_ms": wait_ms,
+                            "attempts": len(attempted_tokens),
+                            "remote_checks": remote_checks,
+                            "cache_hits": cache_hits,
+                            "source": "gateway_trust",
+                        })
+                    return trusted_winner
             if len(candidates) > 1 and all(
                 self._candidate_remote_fresh(token, plan_type, plan_types, source_type)
                 or self._candidate_light_probe_eligible(
