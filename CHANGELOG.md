@@ -7,6 +7,28 @@
 
 > 更新时间精确到分钟；历史条目按镜像构建时间回填，缺少构建记录的旧版本分钟位记为 00:00。
 
+## [1.9.26] 2026-11-19 04:40
+
+继续修复「系统侧」失败（上游长尾不动）：已出图的请求不再被总预算杀在存盘，选号 30 秒上限真正生效，并为 OAuth 刷新竞态补上等待窗口。
+
+### 修复
+
+- [修复] 已下载/放大完成的图片不再因请求总截止时间在**存盘阶段**被杀（11/19 的 12 笔 `task_interrupted` 中 7 笔属此类：第二次尝试已 resolve+download 成功，只差写盘）；下载/生成阶段仍受预算约束，仅放开交付这一步。
+- [修复] 选号 30 秒上限真正生效：`selection_deadline` 下传到并行探测、轻量 `/me` 与全量 `fetch_remote_info` 的每次调用，剩余 <0.5 秒直接按超时退出，不再出现 37/77/116 秒的选号慢失败。
+- [修复] OAuth 刷新竞态恢复增加「等待并重新解析最新 token」窗口（最多 3×200ms、受选号 deadline 约束）：批量刷新提交后约 200ms 新凭据才可见，原先恢复函数看到「token 未变」就放弃，导致并发请求在竞态窗口内被误判 `no_available_account`。
+- [优化] `image_account_selection_failed` 保留 `reasons` 统计，便于区分账号失效 / 刷新竞态 / 上游超时。
+
+### 失败分类结论（11/19 00:00–04:30，独立复核）
+
+- 34 笔失败中**纯上游仅 2 笔（6%）**：`image_poll_timeout`（SSE 断流 + 结果落盘慢）；
+- 其余 32 笔（94%）是本地决策放大：选号刷新竞态 17（1.9.24/25/26 修复）、170s 预算在落盘前杀单 12（本版修复）、选号 30s 上限失效 3（本版修复）；
+- 14 笔 >120s 慢请求：主因上游 poll/SSE 长尾（conversation_stream 33s + poll_wait 53s，重试放大），本机落盘/出口/锁均正常，不改。
+
+### 验证
+
+- 新增 `tests/test_image_result_deadline_delivery.py`、`tests/test_account_selection_deadline.py`，与 `tests/test_selection_refresh_race.py` 合计 8 个用例
+- 全量测试 702 用例：701 通过 / 1 跳过
+
 ## [1.9.25] 2026-11-19 04:10
 
 修复 1.9.24 刷新竞态分支的构造参数错误（`RefreshCredentialsChangedError` 不接受位置参数），该错误会让选号直接抛内部 TypeError，仍表现为 `no_available_account`。

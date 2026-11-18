@@ -61,6 +61,11 @@ _CredentialGeneration = tuple[str, str, str]
 
 _MISSING = object()
 
+# One candidate never gets more than this much of the remaining image-selection
+# window for a remote validation call. A smaller remainder is treated as an
+# already-expired deadline: issuing the call would guarantee an overrun.
+_MIN_SELECTION_REMOTE_TIMEOUT_SECONDS = 0.5
+
 
 def _index_plan_key(account: dict) -> str:
     value = AccountService._normalize_account_type(account.get("type"))
@@ -2450,15 +2455,24 @@ class AccountService:
         request pay ~5s per dead candidate; in parallel the wait is bounded by
         the fastest healthy one. Probes still running when a winner is found
         finish on their own within ``timeout``.
+
+        ``deadline`` (monotonic) clips both the wait and the per-probe timeout,
+        so a round started late in the selection window cannot keep its full
+        5s budget and overshoot the caller's deadline.
         """
         from concurrent.futures import TimeoutError as FuturesTimeoutError
 
         failures: dict[str, BaseException] = {}
         if not tokens:
             return None, failures
-        wait_timeout = float(timeout) + 1.0
         if deadline is not None:
-            wait_timeout = min(wait_timeout, max(0.0, deadline - time.monotonic()))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None, failures
+            timeout = min(float(timeout), remaining)
+            wait_timeout = min(float(timeout) + 1.0, remaining)
+        else:
+            wait_timeout = float(timeout) + 1.0
         executor = ThreadPoolExecutor(
             max_workers=len(tokens),
             thread_name_prefix="image-probe",
@@ -2485,7 +2499,11 @@ class AccountService:
             executor.shutdown(wait=False, cancel_futures=True)
         return winner, failures
 
-    def _recover_after_refresh_race(self, access_token: str) -> str | None:
+    def _recover_after_refresh_race(
+            self,
+            access_token: str,
+            deadline_monotonic: float | None = None,
+    ) -> str | None:
         """Keep a candidate whose OAuth credentials were rotated mid-selection.
 
         ``RefreshCredentialsChangedError`` means another worker refreshed the
@@ -2493,19 +2511,52 @@ class AccountService:
         account itself is healthy. Resolve the newest access token, lease its
         image slot (the old token's slot is released) and confirm liveness with
         one cheap ``/me`` probe. Returns the newest usable token or ``None``.
+
+        The confirmation probe is clamped to ``deadline_monotonic`` like every
+        other selection validation, so the recovery path cannot outlive the
+        selection window either.
+
+        A missing newer token usually means the rotation (often the watcher
+        renewing in batches outside the per-token single-flight) is still
+        committing. Waiting a short, deadline-bounded window and re-resolving is
+        what keeps a concurrent burst from turning this benign race into
+        ``no_available_account``: the token store publishes the new credential a
+        few hundred milliseconds later.
         """
         latest_token = str(self.resolve_access_token(access_token) or "").strip()
+        if not latest_token or latest_token == access_token:
+            for _ in range(3):
+                wait_secs = 0.2
+                if deadline_monotonic is not None:
+                    remaining = deadline_monotonic - time.monotonic()
+                    if remaining < _MIN_SELECTION_REMOTE_TIMEOUT_SECONDS + 0.1:
+                        break
+                    wait_secs = min(
+                        wait_secs,
+                        max(0.05, remaining - _MIN_SELECTION_REMOTE_TIMEOUT_SECONDS),
+                    )
+                time.sleep(wait_secs)
+                latest_token = str(self.resolve_access_token(access_token) or "").strip()
+                if latest_token and latest_token != access_token:
+                    break
         self.release_image_slot(access_token)
         if not latest_token or latest_token == access_token:
-            # No newer token appeared yet (or the account vanished): let the
-            # selection loop lease another candidate.
+            # Still no newer token: let the selection loop lease another
+            # candidate instead of burning the rest of the window here.
             return None
         with self._image_slot_condition:
             self._image_inflight[latest_token] = (
                 int(self._image_inflight.get(latest_token, 0)) + 1
             )
+        probe_timeout = 5.0
+        if deadline_monotonic is not None:
+            remaining = deadline_monotonic - time.monotonic()
+            if remaining < _MIN_SELECTION_REMOTE_TIMEOUT_SECONDS:
+                self.release_image_slot(latest_token)
+                return None
+            probe_timeout = min(probe_timeout, remaining)
         try:
-            self.probe_access_token_light(latest_token, timeout=5.0)
+            self.probe_access_token_light(latest_token, timeout=probe_timeout)
         except Exception:
             self.release_image_slot(latest_token)
             return None
@@ -2843,11 +2894,39 @@ class AccountService:
         def count_selection_failure(exc: BaseException | None) -> None:
             key = type(exc).__name__ if exc is not None else "unknown"
             selection_failures[key] = selection_failures.get(key, 0) + 1
+
+        def remaining_selection_seconds() -> float:
+            return selection_deadline - time.monotonic()
+
+        def raise_selection_timeout(stage: str) -> None:
+            raise ImageAccountSelectionError(
+                "unavailable",
+                f"image account selection timed out {stage}",
+            )
+
+        def selection_remote_timeout(default_timeout: float) -> float | None:
+            """Clip one remote validation call to the remaining selection window.
+
+            The deadline used to be checked between candidate rounds only, so a
+            round with three candidates could still pay 3 x 8s (full fetch) or
+            3 x 5s (light probe) after the last check and walk past the 30s cap
+            — measured 37s / 77s / 116s no_available_account failures. Passing
+            the clipped value into the HTTP call is what actually bounds the
+            round. ``None`` means less than the floor remains, which counts as
+            already timed out instead of buying one more useless call.
+            """
+            remaining = remaining_selection_seconds()
+            if remaining < _MIN_SELECTION_REMOTE_TIMEOUT_SECONDS:
+                return None
+            return min(default_timeout, remaining)
+
         # 控制流只保留两个出口，但最终是否能说“额度耗尽”必须谨慎：
         # 只要出现过非额度类失败，就说明不能断言全部账号都耗尽，应返回可重试的 unavailable。
         saw_remote_quota_exhausted = False
         saw_unavailable_failure = False
         for _attempt in range(max_attempts):
+            if remaining_selection_seconds() <= 0:
+                raise_selection_timeout("before the next candidate round")
             if upstream_circuit.is_open():
                 raise ImageAccountSelectionError(
                     "unavailable",
@@ -2945,9 +3024,14 @@ class AccountService:
                             token, plan_type, plan_types, source_type
                         )
                     ]
+                    probe_timeout = selection_remote_timeout(5.0)
+                    if probe_timeout is None:
+                        for token in candidates:
+                            self.release_image_slot(token)
+                        raise_selection_timeout("during remote validation")
                     winner, failures = self._probe_candidates_parallel(
                         probe_tokens,
-                        timeout=5.0,
+                        timeout=probe_timeout,
                         deadline=selection_deadline,
                     )
                     if winner is None:
@@ -3034,14 +3118,21 @@ class AccountService:
                 and self._account_matches_any_plan_type(cached_account, plan_types)
                 and self._account_matches_source_type(cached_account, source_type)
             ):
+                probe_timeout = selection_remote_timeout(5.0)
+                if probe_timeout is None:
+                    self.release_image_slot(access_token)
+                    raise_selection_timeout("during remote validation")
                 try:
-                    self.probe_access_token_light(access_token, timeout=5.0)
+                    self.probe_access_token_light(access_token, timeout=probe_timeout)
                 except RefreshCredentialsChangedError as probe_exc:
                     # Same race as the full-fetch path: the credential rotated
                     # mid-probe. Recover with the newest token instead of
                     # dropping the candidate.
                     count_selection_failure(probe_exc)
-                    recovered = self._recover_after_refresh_race(access_token)
+                    recovered = self._recover_after_refresh_race(
+                        access_token,
+                        deadline_monotonic=selection_deadline,
+                    )
                     if recovered:
                         return recovered
                     if time.monotonic() >= selection_deadline:
@@ -3081,13 +3172,17 @@ class AccountService:
                 else:
                     cache_hits += 1
                     return str(cached_account.get("access_token") or access_token)
+            request_timeout = selection_remote_timeout(8.0)
+            if request_timeout is None:
+                self.release_image_slot(access_token)
+                raise_selection_timeout("during remote validation")
             remote_checks += 1
             try:
                 account = self.fetch_remote_info(
                     access_token,
                     "get_available_access_token",
                     image_scope=True,
-                    request_timeout=8.0,
+                    request_timeout=request_timeout,
                 )
             except RefreshCredentialsChangedError as refresh_exc:
                 # A concurrent worker (another request or the token watcher)
@@ -3098,7 +3193,10 @@ class AccountService:
                 # recovery a burst of concurrent requests turned the races into
                 # 503 no_available_account failures.
                 count_selection_failure(refresh_exc)
-                recovered = self._recover_after_refresh_race(access_token)
+                recovered = self._recover_after_refresh_race(
+                    access_token,
+                    deadline_monotonic=selection_deadline,
+                )
                 if recovered:
                     wait_ms = int((time.monotonic() - selection_started) * 1000)
                     if wait_ms >= 2000:

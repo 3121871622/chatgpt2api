@@ -145,7 +145,7 @@ wheels = [
 
 [[package]]
 name = "qingmeng-gpt"
-version = "1.9.25"
+version = "1.9.26"
 source = { virtual = "." }
 dependencies = [
     { name = "curl-cffi" },

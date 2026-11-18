@@ -542,6 +542,9 @@ def format_image_result(
     created: int | None = None,
     message: str = "",
     requested_size: str | None = None,
+    # Callers still pass the request budget, but it no longer gates storage:
+    # once the bytes are decoded/downloaded the result is delivered regardless
+    # of the deadline (see the save_image_bytes() call below).
     deadline_monotonic: float | None = None,
     output_format: str = "",
     output_compression: int | None = None,
@@ -630,10 +633,17 @@ def format_image_result(
             convert_ms += _elapsed_ms(stage_started)
         mime_type = image_mime_type(image_bytes)
         stage_started = time.perf_counter()
+        # The image bytes are already in hand, so the request budget no longer
+        # has anything to protect here: writing them usually takes <3s, while
+        # giving up now turns a completed generation into task_interrupted and
+        # makes the next retry download the same image again. 12 of the 11/19
+        # failures died at this exact point, 7 of them after download+upscale
+        # had already finished. Download/upload/generation stay deadline-bound;
+        # only delivery after that point is unconditional.
         stored_url = save_image_bytes(
             image_bytes,
             base_url,
-            deadline_monotonic=deadline_monotonic,
+            deadline_monotonic=None,
         )
         store_ms += _elapsed_ms(stage_started)
         if stored_url:
