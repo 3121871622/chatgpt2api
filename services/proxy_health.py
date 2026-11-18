@@ -41,6 +41,13 @@ EGRESS_FAILURE_CODES = frozenset({
     "proxy_connection_failed",
     "image_download_failed",
     "task_interrupted",
+    # An interrupted or timed-out SSE stream carries no account signal: the
+    # stream itself broke (image egress node or upstream edge). Feeding these
+    # into the health registry lets a flaky image egress cool down instead of
+    # silently absorbing every request and turning them into 160-240s slow
+    # calls that end in task_interrupted.
+    "image_stream_interrupted",
+    "image_stream_timeout",
 })
 
 

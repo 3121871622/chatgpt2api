@@ -546,6 +546,7 @@ def format_image_result(
     output_format: str = "",
     output_compression: int | None = None,
     timing: dict[str, int] | None = None,
+    max_images: int = 1,
 ) -> dict[str, Any]:
     prepared: list[tuple[dict[str, Any], bytes, str]] = []
     for item in items:
@@ -580,6 +581,34 @@ def format_image_result(
     # GIF is present, keep only the animated assets.
     if any(mime_type == "image/gif" for _, _, mime_type in prepared):
         prepared = [entry for entry in prepared if entry[2] == "image/gif"]
+    # One generation slot is exactly one requested image (the API parameter n
+    # counts slots). The upstream conversation can still attach several images
+    # to a single slot — 2-8 images were measured on requests whose n was 1,
+    # often the same bytes saved twice under different URLs. Keep only the
+    # first distinct image per slot so a response never carries more images
+    # than were requested, and drop byte-identical repeats before any upscale
+    # or storage work is done for them.
+    limit = max(1, int(max_images or 1))
+    if len(prepared) > 1:
+        limited: list[tuple[dict[str, Any], bytes, str]] = []
+        seen_digests: set[bytes] = set()
+        for entry in prepared:
+            digest = hashlib.sha256(entry[1]).digest()
+            if digest in seen_digests:
+                continue
+            seen_digests.add(digest)
+            limited.append(entry)
+        duplicates = len(prepared) - len(limited)
+        excess = max(0, len(limited) - limit)
+        if duplicates or excess:
+            prepared = limited[:limit]
+            logger.info({
+                "event": "image_result_excess_images_dropped",
+                "kept": len(prepared),
+                "duplicates": duplicates,
+                "excess": excess,
+                "max_images": limit,
+            })
 
     data: list[dict[str, Any]] = []
     image_urls: list[str] = []
