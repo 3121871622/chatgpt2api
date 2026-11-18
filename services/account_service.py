@@ -2467,7 +2467,11 @@ class AccountService:
         """
         account = self.get_account(token) or {}
         if not account:
-            return False
+            # Token is not in the local index yet (gateway lease ahead of the
+            # local snapshot).  The gateway already vetted the account as
+            # ready; trust the lease and let any dead credential surface as a
+            # normal per-attempt failure.
+            return True
         if str(account.get("last_remote_check_result") or "").strip().lower() == "invalid":
             return False
         if str(account.get("status") or "").strip() in {"禁用", "异常"}:

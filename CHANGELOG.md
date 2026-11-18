@@ -7,6 +7,18 @@
 
 > 更新时间精确到分钟；历史条目按镜像构建时间回填，缺少构建记录的旧版本分钟位记为 00:00。
 
+## [1.9.30] 2026-11-19 05:20
+
+修复 1.9.29 信任路径实际上仍然失效的问题：本地 index 中不存在的 token 被错误拒绝，导致信任路径找不到任何候选后回落到验证路径。
+
+### 根因
+
+1.9.29 上线后日志显示信任路径有触发（`source=gateway_trust`），但大多数请求仍然 503：`_local_candidate_usable` 在本地 index 中找不到 token 时直接 `return False`，而 gateway 租来的 token 可能还未同步到本地快照，导致所有候选均被拒绝，回落到带 `RefreshCredentialsChangedError` 的全量验证路径。
+
+### 修复
+
+- [修复] `_local_candidate_usable`：token 不在本地 index 时改为 `return True`（信任 gateway 租约，让真正失效的凭据在生图阶段通过跨账号重试暴露），而不是直接拒绝
+
 ## [1.9.29] 2026-11-19 05:10
 
 **彻底修复并发批量请求下的 503 no_available_account 根本原因。**
