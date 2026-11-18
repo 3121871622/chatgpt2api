@@ -313,6 +313,11 @@ def create_app() -> FastAPI:
             requested = full_path.strip("/")
             if requested != admin_path and not requested.startswith(f"{admin_path}/"):
                 raise HTTPException(status_code=404, detail="Not Found")
+            # The SPA shell must be revalidated on every load. After a container
+            # update the browser otherwise keeps an old index.html that points
+            # at hashed bundles the new image no longer serves, which surfaces
+            # as a blank console or dead buttons (e.g. the changelog dialog).
+            return FileResponse(asset, headers={"Cache-Control": "no-cache, must-revalidate"})
         return FileResponse(asset)
 
     return app

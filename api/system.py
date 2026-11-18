@@ -62,6 +62,7 @@ from services.admin_auth_service import AdminAuthError, admin_auth_service
 from services.homepage_service import HomepageError, homepage_service
 from services.backup_service import BackupError, backup_service
 from services.changelog_service import changelog_service
+from services.update_service import update_service
 from services.config import config
 from services.legacy_sync_service import legacy_sync_service
 from services.account_governance_service import account_governance_service
@@ -168,6 +169,9 @@ class LogDeleteRequest(BaseModel):
     ids: list[str] = []
 class BackupDeleteRequest(BaseModel):
     key: str = ""
+
+class UpdateApplyRequest(BaseModel):
+    version: str = Field(min_length=1, max_length=32)
 
 
 class RetentionCleanupRequest(BaseModel):
@@ -361,6 +365,49 @@ def create_router(app_version: str) -> APIRouter:
         """Local changelog projection (reads CHANGELOG.md, never the network)."""
         require_admin(authorization)
         return await run_in_threadpool(changelog_service.view, limit)
+
+    @router.get("/api/system/update/check")
+    async def check_update(
+        force: bool = Query(default=False),
+        authorization: str | None = Header(default=None),
+    ):
+        """Compare the local VERSION with the latest tag on GitHub."""
+        require_admin(authorization)
+        try:
+            return await run_in_threadpool(update_service.check, force=force)
+        except Exception as exc:  # noqa: BLE001 - surfaced as a structured error
+            raise HTTPException(
+                status_code=502,
+                detail={"error": f"版本检测失败：{exc}"},
+            ) from exc
+
+    @router.get("/api/system/update/status")
+    async def get_update_status(authorization: str | None = Header(default=None)):
+        """Host update-agent heartbeat and in-flight update request state."""
+        require_admin(authorization)
+        return await run_in_threadpool(update_service.status)
+
+    @router.post("/api/system/update/apply")
+    async def apply_update(
+        body: UpdateApplyRequest,
+        authorization: str | None = Header(default=None),
+    ):
+        """Queue a one-click update request for the host-side update agent."""
+        require_admin(authorization)
+        try:
+            result = await run_in_threadpool(
+                update_service.apply,
+                body.version,
+                requested_by="admin",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        audit_service.record(
+            "update.apply",
+            target=body.version,
+            detail={"submitted": bool(result.get("submitted"))},
+        )
+        return result
 
     @router.get("/api/system/legacy-sync")
     async def get_legacy_sync(authorization: str | None = Header(default=None)):

@@ -7,6 +7,29 @@
 
 > 更新时间精确到分钟；历史条目按镜像构建时间回填，缺少构建记录的旧版本分钟位记为 00:00。
 
+## [1.9.22] 2026-11-19 03:10
+
+新增控制台「更新中心」：检测 GitHub 仓库最新版本、一键更新并自动重启容器；同时修复容器更新后更新日志页面打不开的问题。
+
+### 新增
+
+- [新增] `GET /api/system/update/check`：读取本地 VERSION 与 GitHub 仓库标签比对（匿名 API、5 分钟缓存、`force=1` 可强刷），返回最新版本、发布页、CHANGELOG 摘录与宿主机更新代理状态。
+- [新增] `POST /api/system/update/apply` + `GET /api/system/update/status`：把更新请求写入 `<data>/update/request.json`，由宿主机代理 `/root/qm_update_agent.sh`（cron 每分钟）执行 `docker pull ghcr.io/3121871622/chatgpt2api:<ver>` → 备份旧 tag → `docker compose up -d --force-recreate`，进度写回 `state.json`；应用容器不需要挂载 docker.sock。
+- [新增] 更新日志弹窗内置「更新中心」：打开即自动检测，显示当前/最新版本与发布页，支持一键更新、进度轮询，更新完成后页面自动刷新。
+- [新增] 一键更新前自动备份当前镜像 tag（`*-preupdate-<时间>`），失败可在宿主机回滚。
+
+### 修复
+
+- [修复] 容器更新后浏览器可能缓存旧 `index.html`，它指向已被替换的哈希 bundle，表现为控制台空白或「更新日志」点不开；现在 `index.html` 统一返回 `Cache-Control: no-cache, must-revalidate`，每次加载都会取新壳。
+- [修复] 更新日志弹窗读取失败时增加「重试」入口，不再只显示错误文本。
+
+### 验证
+
+- 新增 `tests/test_update_service.py`（9 用例：版本解析、GitHub 对比、失败降级、一键更新校验与请求落盘、代理心跳）
+- 全量测试 692 用例：691 通过 / 1 跳过
+- 前端 `npm run build` 通过（tsc + vite）
+- 线上验证结果见发布记录
+
 ## [1.9.21] 2026-11-19 02:10
 
 补齐 1.9.20 出口健康度补丁的两个缺口，并给出近期「报错偏高 / 慢调用变多」的量化归因。

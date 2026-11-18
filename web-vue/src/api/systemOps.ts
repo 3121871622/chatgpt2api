@@ -195,6 +195,45 @@ export interface ChangelogView {
   totals: { releases: number; archive: number }
 }
 
+export interface UpdateAgentState {
+  phase: 'idle' | 'pulling' | 'applying' | 'done' | 'failed' | string
+  target_version: string
+  current_version: string
+  message: string
+  updated_at: string
+  finished_at: string
+  updater_available: boolean
+}
+
+export interface UpdateCheckView {
+  enabled: boolean
+  source: string
+  repo: string
+  current_version: string
+  latest_version: string
+  update_available: boolean
+  release_url: string
+  notes: string
+  checked_at: string
+  updater: UpdateAgentState
+  error: string
+}
+
+export interface UpdateStatusView {
+  current_version: string
+  pending: Record<string, unknown>
+  updater: UpdateAgentState
+  checked_at: string
+}
+
+export interface UpdateApplyResult {
+  submitted: boolean
+  pending: boolean
+  target_version: string
+  current_version?: string
+  message: string
+}
+
 export interface LegacySyncProbe {
   path: string
   exists: boolean
@@ -485,6 +524,14 @@ export const systemOpsApi = {
 
   changelog: (limit = 10) =>
     apiClient.get<never, ChangelogView>('/api/system/changelog', { params: { limit } }),
+
+  checkUpdate: (force = false) =>
+    apiClient.get<never, UpdateCheckView>('/api/system/update/check', { params: { force } }),
+
+  updateStatus: () => apiClient.get<never, UpdateStatusView>('/api/system/update/status'),
+
+  applyUpdate: (version: string) =>
+    apiClient.post<never, UpdateApplyResult>('/api/system/update/apply', { version }),
 
   legacySync: () => apiClient.get<never, LegacySyncState>('/api/system/legacy-sync'),
 
