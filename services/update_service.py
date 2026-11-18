@@ -131,6 +131,43 @@ def _release_notes(changelog_text: str, version: str) -> str:
     return text[:2000]
 
 
+def _timestamp_is_fresh(epoch_value: object, text_value: object) -> bool:
+    """Return True when the update agent wrote its heartbeat recently.
+
+    The agent runs on the host (usually UTC), the app container runs with
+    TZ=Asia/Shanghai. The agent therefore writes `updated_epoch` (absolute
+    seconds), which is timezone-proof; older state files are parsed as both
+    UTC and local time and counted fresh when either reading is close.
+    """
+    now = time.time()
+    epoch = None
+    try:
+        epoch = float(str(epoch_value).strip())
+    except (TypeError, ValueError):
+        epoch = None
+    if epoch is not None and epoch > 0:
+        return abs(now - epoch) <= _UPDATER_STALE_SECONDS
+    text = str(text_value or "").strip()
+    if not text:
+        return False
+    try:
+        parsed = time.strptime(text, "%Y-%m-%d %H:%M:%S")
+    except (ValueError, OverflowError):
+        return False
+    candidates = []
+    try:
+        candidates.append(int(time.mktime(parsed)))
+    except (ValueError, OverflowError):
+        pass
+    try:
+        import calendar
+
+        candidates.append(int(calendar.timegm(parsed)))
+    except (ValueError, OverflowError):
+        pass
+    return any(abs(now - candidate) <= _UPDATER_STALE_SECONDS for candidate in candidates)
+
+
 class UpdateService:
     def __init__(self) -> None:
         self._lock = Lock()
@@ -142,13 +179,7 @@ class UpdateService:
     def _updater_state(self) -> dict[str, Any]:
         state = _read_json(_update_dir() / "state.json")
         updated_at = str(state.get("updated_at") or "")
-        fresh = False
-        if updated_at:
-            try:
-                age = time.mktime(time.strptime(updated_at, "%Y-%m-%d %H:%M:%S")) - time.time()
-                fresh = abs(age) <= _UPDATER_STALE_SECONDS
-            except (ValueError, OverflowError):
-                fresh = False
+        fresh = _timestamp_is_fresh(state.get("updated_epoch"), updated_at)
         return {
             "phase": str(state.get("phase") or "idle"),
             "target_version": str(state.get("target_version") or ""),

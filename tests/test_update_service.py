@@ -120,3 +120,40 @@ def test_status_reports_agent_heartbeat(service, tmp_path):
     status = service.status()
     assert status["updater"]["phase"] == "pulling"
     assert status["updater"]["updater_available"] is True
+
+def test_status_accepts_agent_epoch_heartbeat(service, tmp_path):
+    """The host agent runs in UTC; container runs in Asia/Shanghai. The epoch
+    field must win so a live agent is not reported as offline."""
+    directory = tmp_path / "update"
+    directory.mkdir(exist_ok=True)
+    (directory / "state.json").write_text(
+        json.dumps({
+            "phase": "idle",
+            "target_version": "",
+            "current_version": "1.9.22",
+            "message": "",
+            "updated_at": "2026-11-18 19:00:00",
+            "updated_epoch": int(time.time()),
+            "finished_at": "",
+        }),
+        encoding="utf-8",
+    )
+    assert service.status()["updater"]["updater_available"] is True
+
+
+def test_status_accepts_utc_text_heartbeat(service, tmp_path):
+    directory = tmp_path / "update"
+    directory.mkdir(exist_ok=True)
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+    (directory / "state.json").write_text(
+        json.dumps({
+            "phase": "idle",
+            "target_version": "",
+            "current_version": "1.9.22",
+            "message": "",
+            "updated_at": stamp,
+            "finished_at": "",
+        }),
+        encoding="utf-8",
+    )
+    assert service.status()["updater"]["updater_available"] is True

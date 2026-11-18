@@ -26,8 +26,8 @@ log() { printf '%s %s\n' "$(now)" "$*" >>"$LOG"; }
 write_state() {
     # $1=phase $2=target $3=current $4=message $5=finished_at
     tmp="$STATE.tmp"
-    printf '{"phase":"%s","target_version":"%s","current_version":"%s","message":"%s","updated_at":"%s","finished_at":"%s"}\n' \
-        "$1" "$2" "$3" "$4" "$(now)" "$5" >"$tmp" && mv "$tmp" "$STATE"
+    printf '{"phase":"%s","target_version":"%s","current_version":"%s","message":"%s","updated_at":"%s","updated_epoch":%s,"finished_at":"%s"}\n' \
+        "$1" "$2" "$3" "$4" "$(now)" "$(date +%s)" "$5" >"$tmp" && mv "$tmp" "$STATE"
 }
 
 current_version() {
