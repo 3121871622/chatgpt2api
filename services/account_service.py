@@ -2476,6 +2476,13 @@ class AccountService:
             return False
         if str(account.get("status") or "").strip() in {"禁用", "异常"}:
             return False
+        if account.get("refresh_token_invalid_at"):
+            # The refresh token is dead, so this access token can never be
+            # renewed and upstream may already have revoked it. Picking such an
+            # account only burns an attempt: measured 1.9.30 traffic had ~11%
+            # auth_invalid (401 token_revoked) and those were all
+            # refresh-token-invalid accounts waiting to be culled.
+            return False
         return (
             self._account_matches_plan_type(account, plan_type)
             and self._account_matches_any_plan_type(account, plan_types)

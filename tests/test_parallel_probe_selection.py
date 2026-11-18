@@ -144,3 +144,27 @@ def test_gateway_trust_skips_locally_invalid_candidate(monkeypatch) -> None:
 
     assert token == "tok-b"
     assert released == ["tok-a"]
+
+
+def test_gateway_trust_skips_dead_refresh_token_account(monkeypatch) -> None:
+    """An account whose refresh token is dead cannot be renewed.
+
+    Upstream revokes the old access token as soon as a refresh happens, so
+    these accounts surface as 401 auth_invalid and burn a whole attempt.
+    Measured 1.9.30 traffic: ~11% auth_invalid, all refresh-token-invalid.
+    """
+    monkeypatch.setenv("QINGMENG_IMAGE_SELECTION_TRUST_GATEWAY", "1")
+    monkeypatch.setattr(account_module._gw, "is_enabled", lambda: True)
+    accounts = {
+        "tok-dead": _account("tok-dead", refresh_token_invalid_at="2026-11-19T00:00:00+00:00"),
+        "tok-good": _account("tok-good"),
+    }
+
+    def probe(token, timeout=5.0):
+        pytest.fail("gateway-trusted selection must not probe upstream")
+
+    service, released = _service(accounts, probe)
+    token = AccountService.get_available_access_token(service)
+
+    assert token == "tok-good"
+    assert released == ["tok-dead"]
