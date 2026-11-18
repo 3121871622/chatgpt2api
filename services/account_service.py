@@ -2644,13 +2644,22 @@ class AccountService:
                     timeout=gw_timeout,
                 )
                 if tok:
+                    # The gateway index can lag a batch behind the local store:
+                    # after the watcher rotates an account's OAuth credentials,
+                    # the lease still carries the previous access token, which
+                    # upstream has already revoked (401 token_revoked). Resolve
+                    # the alias so the request uses the fresh token the local
+                    # store already knows about.
+                    resolved_lease = str(self.resolve_access_token(tok) or "").strip()
+                    active_lease = resolved_lease or tok
                     # Lease exists in the gateway; mirror into local inflight
-                    # so release_image_slot can find it.
+                    # under the token we actually hand out so release_image_slot
+                    # can find it.
                     with self._image_slot_condition:
-                        self._image_inflight[tok] = (
-                            int(self._image_inflight.get(tok, 0)) + 1
+                        self._image_inflight[active_lease] = (
+                            int(self._image_inflight.get(active_lease, 0)) + 1
                         )
-                    return tok
+                    return active_lease
                 if tok == "" and not wait:
                     # Gateway says pool is exhausted and caller doesn't want to block.
                     return None

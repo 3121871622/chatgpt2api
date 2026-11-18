@@ -2355,6 +2355,7 @@ def _generate_single_image(
     fallback_retry_pending = False
     fallback_retry_used = False
     fallback_from_egress: dict[str, Any] = {}
+    auth_refresh_retry_used = False
     image_attempts: list[dict[str, Any]] = []
     retry_error: ImageGenerationError | None = None
     pending_switch_attempt_index: int | None = None
@@ -2449,6 +2450,7 @@ def _generate_single_image(
                 fallback_retry_pending = False
                 fallback_retry_used = False
                 fallback_from_egress = {}
+                auth_refresh_retry_used = False
         except ImageAccountSelectionError as exc:
             _monitor_image_stage(
                 request,
@@ -3010,6 +3012,57 @@ def _generate_single_image(
                         fallback_from_egress_label=fallback_from_egress.get("egress_label", ""),
                     )
                 continue
+
+            if (
+                failure.capability == "auth"
+                and failure.code in {
+                    "auth_invalid",
+                    "token_invalid",
+                    "token_invalidated",
+                    "token_revoked",
+                    "invalid_access_token",
+                }
+                and not auth_refresh_retry_used
+            ):
+                # Upstream revokes the previous access token as soon as the
+                # OAuth refresh exchanges it. A burst that read the credential
+                # just before the watcher committed the rotation therefore gets
+                # a valid-looking but already revoked token (`token_revoked`
+                # 401). Refresh this account once and retry it with the fresh
+                # token before burning another account: the pool quality is
+                # fine, the credential was simply one rotation behind.
+                auth_refresh_retry_used = True
+                try:
+                    fresh_token = account_service.refresh_access_token(
+                        token,
+                        force=True,
+                        event="image_auth_refresh_retry",
+                        raise_on_error=True,
+                        image_scope=True,
+                    )
+                except Exception:
+                    fresh_token = ""
+                if not fresh_token:
+                    fresh_token = account_service.resolve_access_token(token) or ""
+                if fresh_token and fresh_token != token:
+                    retry_token = fresh_token
+                    logger.warning({
+                        "event": "image_auth_token_retry",
+                        "request_token": token,
+                        "account_email": account_email,
+                        "failure_code": failure.code,
+                        "index": index,
+                    })
+                    if request.trace_image_perf:
+                        _monitor_image_stage(
+                            request,
+                            "image_auth_token_retry",
+                            account_email=account_email,
+                            index=index,
+                            total=total,
+                            status="retrying",
+                        )
+                    continue
 
             if isinstance(exc, ImageGenerationError):
                 image_error = exc
