@@ -2357,6 +2357,7 @@ def _generate_single_image(
     fallback_from_egress: dict[str, Any] = {}
     auth_refresh_retry_used = False
     image_attempts: list[dict[str, Any]] = []
+    stale_account_skips = 0
     retry_error: ImageGenerationError | None = None
     pending_switch_attempt_index: int | None = None
     account_attempt_started = 0.0
@@ -2708,6 +2709,28 @@ def _generate_single_image(
             "account_wait_ms": account_wait_ms,
             "index": index,
         })
+        if not account:
+            # The credential was culled from the pool between selection and use:
+            # the credential verifier removes revoked accounts concurrently, so a
+            # token can be gone by the time we look it up. Using it only produces
+            # a 401 on every attempt (measured 09:39 burst: 4 attempts, empty
+            # account_email, ~1.2s each all failing at /backend-api/files).
+            stale_account_skips += 1
+            logger.warning({
+                "event": "image_account_missing",
+                "call_id": request.call_id,
+                "index": index,
+                "skips": stale_account_skips,
+                "account_wait_ms": account_wait_ms,
+            })
+            account_service.release_image_slot(token)
+            if stale_account_skips <= max(1, max_account_attempts):
+                retry_token = ""
+                continue
+            raise ImageAccountSelectionError(
+                "unavailable",
+                "image account vanished from the pool before use",
+            )
         backend: OpenAIBackendAPI | None = None
         egress_acquired = False
         try:
