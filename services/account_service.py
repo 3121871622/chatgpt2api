@@ -1636,6 +1636,41 @@ class AccountService:
         with self._lock:
             return self._resolve_access_token_locked(access_token)
 
+    def wait_for_rotated_access_token(
+        self,
+        access_token: str,
+        *,
+        budget_seconds: float = 0.75,
+        poll_seconds: float = 0.15,
+    ) -> str:
+        """Wait briefly for a credential rotation to become visible.
+
+        Upstream revokes the previous access token the moment the OAuth refresh
+        exchanges it, but the token store publishes the new credential a beat
+        later (the watcher renews in batches outside the per-token
+        single-flight). A request that lost that race gets ``token_revoked`` on
+        an account whose newest token is only milliseconds away, so waiting a
+        short, bounded window and re-resolving turns the 401 back into a usable
+        credential instead of burning another account.
+
+        Returns the newest token when it differs from ``access_token``,
+        otherwise an empty string.
+        """
+        if not access_token:
+            return ""
+        budget = max(0.0, float(budget_seconds))
+        poll = max(0.01, float(poll_seconds))
+        deadline = time.monotonic() + budget
+        while True:
+            resolved = str(self.resolve_access_token(access_token) or "").strip()
+            if resolved and resolved != access_token:
+                return resolved
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return ""
+            time.sleep(min(poll, remaining))
+
+
     def _get_account_for_token(self, access_token: str) -> tuple[str, dict | None]:
         with self._lock:
             resolved = self._resolve_access_token_locked(access_token)

@@ -3032,18 +3032,28 @@ def _generate_single_image(
                 # token before burning another account: the pool quality is
                 # fine, the credential was simply one rotation behind.
                 auth_refresh_retry_used = True
+                # Force a real RT exchange: image_scope would short-circuit while
+                # the account is busy and hand back the same (revoked) token.
                 try:
                     fresh_token = account_service.refresh_access_token(
                         token,
                         force=True,
                         event="image_auth_refresh_retry",
-                        raise_on_error=True,
-                        image_scope=True,
+                        raise_on_error=False,
+                        image_scope=False,
                     )
                 except Exception:
                     fresh_token = ""
-                if not fresh_token:
-                    fresh_token = account_service.resolve_access_token(token) or ""
+                if not fresh_token or fresh_token == token:
+                    # The rotation may be committing right now (watcher batch or
+                    # another in-flight refresh); wait a bounded beat and
+                    # re-resolve before giving up on this account.
+                    try:
+                        fresh_token = account_service.wait_for_rotated_access_token(
+                            token,
+                        )
+                    except Exception:
+                        fresh_token = ""
                 if fresh_token and fresh_token != token:
                     retry_token = fresh_token
                     logger.warning({

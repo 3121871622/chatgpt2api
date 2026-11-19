@@ -7,6 +7,28 @@
 
 > 更新时间精确到分钟；历史条目按镜像构建时间回填，缺少构建记录的旧版本分钟位记为 00:00。
 
+## [1.9.32] 2026-11-19 09:45
+
+修复高峰批次间歇出现的 `auth_invalid`（401 token_revoked）：选号对了，但请求拿到的 access token 正好在 watcher 轮换窗口里被上游吊销。
+
+### 背景（1.9.31 早高峰实测）
+
+- 09:00–09:36 共 110+ 笔请求，出现 2 笔 `auth_invalid`（09:19:56 一次、09:28:02 一次），成功率 98.9%
+- 两次失败形态完全一致：4 次换号全部在 `/backend-api/files` 上传阶段 `401 token_revoked`，每个 attempt 仅 0.4–2.9s；`account_wait=98ms`、`egress=16ms`（选号与出口均正常）
+- 根因：watcher 批量刷新 token 时上游立即吊销旧 AT，本地存储晚一拍才发布新 AT；请求正好读到「本地看着有效、上游已吊销」的旧 token
+- 1.9.28 的 `image_auth_token_retry` 没生效：`refresh_access_token(image_scope=True)` 在账号处于 image busy 时直接返回原 token（短路），`fresh_token == token` 于是放弃重试
+
+### 修复
+
+- [修复] 认证失败重试改为 `image_scope=False` 的真刷新（账号 AT 已被吊销，没有“等图跑完再刷新”的意义）
+- [新增] `account_service.wait_for_rotated_access_token()`：刷新仍拿不到新 token 时，用最多 0.75s（3~5 次轮询）等待轮换落库并重新解析；拿到新 token 就用同一账号重试，避免白烧一个账号
+- 该路径只在上游返回认证失效时触发，正常请求零开销
+
+### 验证
+
+- 新增 `tests/test_wait_for_rotated_token.py`（4 用例：未变化返回空、轮换落库后返回新 token、立即可见、空 token 直接返回）
+- 全量测试 709 用例：708 通过 / 1 跳过
+
 ## [1.9.31] 2026-11-19 05:55
 
 修复信任选号最后一个已知问题：不再选中「refresh token 已失效」的账号，消掉剩余 `auth_invalid`（401 token_revoked）。
