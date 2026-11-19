@@ -2438,6 +2438,11 @@ def _generate_single_image(
                     deadline_monotonic=request.deadline_monotonic or None,
                     required_capabilities=required_capabilities,
                 )
+                # The selected token may be a previous generation of an account
+                # whose OAuth credentials were rotated after selection. Use the
+                # newest credential the store knows about, otherwise the request
+                # goes out with an upstream-revoked token (401 token_revoked).
+                token = account_service.resolve_access_token(token) or token
                 attempted_tokens.add(token)
                 # Capability lists (gif / file_upload) are recorded only after a
                 # *successful* use, so a missing entry means "never verified",

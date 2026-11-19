@@ -2502,11 +2502,19 @@ class AccountService:
         """
         account = self.get_account(token) or {}
         if not account:
-            # Token is not in the local index yet (gateway lease ahead of the
-            # local snapshot).  The gateway already vetted the account as
-            # ready; trust the lease and let any dead credential surface as a
-            # normal per-attempt failure.
-            return True
+            # A rotated credential: the index still holds the previous access
+            # token while the store already published a newer one. Resolve the
+            # alias before deciding — without this the request goes out with a
+            # token upstream has already revoked (401 token_revoked with an
+            # empty account_email, measured 09:39 burst on 1.9.32).
+            resolved = str(self.resolve_access_token(token) or "").strip()
+            if resolved and resolved != token:
+                account = self.get_account(resolved) or {}
+            if not account:
+                # Genuinely unknown to the local store: refuse it. Accepting
+                # unknown tokens made every post-restart request fail with 503
+                # (1.9.33 measured 8/8) because the store had not loaded yet.
+                return False
         if str(account.get("last_remote_check_result") or "").strip().lower() == "invalid":
             return False
         if str(account.get("status") or "").strip() in {"禁用", "异常"}:
