@@ -2381,6 +2381,14 @@ def _generate_single_image(
         error: ImageGenerationError | None = None,
     ) -> bool:
         nonlocal retry_token, fallback_retry_pending, retry_error, pending_switch_attempt_index
+        attempt_budget = max_account_attempts
+        if failure.capability == "auth":
+            # Gateway-leased tokens that fail with 401 come back in ~2s and each
+            # one is a distinct credential, so give auth failures a larger budget
+            # than a slow upstream failure: finishing 4 attempts and still hitting
+            # a revoked token means the wave is wide, not that the pool is empty.
+            # Measured 10:57 failure: 4 attempts x ~2s, all 401.
+            attempt_budget = min(8, max(2, max_account_attempts) * 2)
         if (
             failure.code == "task_interrupted"
             or (
@@ -2388,7 +2396,7 @@ def _generate_single_image(
                 and time.monotonic() >= request.deadline_monotonic
             )
             or not failure.switch_account
-            or len(image_attempts) >= max_account_attempts
+            or len(image_attempts) >= attempt_budget
         ):
             return False
         retry_token = ""
