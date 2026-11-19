@@ -1,3 +1,4 @@
+import collections
 import threading
 import time
 
@@ -8,6 +9,8 @@ from services.account_service import account_service
 def _isolate(monkeypatch, tokens=None):
     monkeypatch.setattr(account_service, "_gw_bad_tokens", dict(tokens or {}))
     monkeypatch.setattr(account_service, "_gw_bad_lock", threading.Lock())
+    monkeypatch.setattr(account_service, "_gw_auth_failures", collections.deque())
+    monkeypatch.setattr(account_service, "_gw_auth_cooldown_until", 0.0)
 
 
 def test_mark_and_list_gateway_bad_token(monkeypatch):
@@ -49,3 +52,36 @@ def test_bad_tokens_are_excluded_from_gateway_lease(monkeypatch):
 
     excluded = captured.get("excluded") or []
     assert "tok-bad" in excluded
+
+
+def test_auth_burst_opens_gateway_bypass(monkeypatch):
+    """Three revoked leases in 30s mean the gateway pool is polluted, not stale."""
+    _isolate(monkeypatch)
+    assert account_service.gateway_auth_bypass_remaining() == 0.0
+
+    account_service.mark_gateway_token_bad("tok-1")
+    account_service.mark_gateway_token_bad("tok-2")
+    assert account_service.gateway_auth_bypass_remaining() == 0.0
+
+    account_service.mark_gateway_token_bad("tok-3")
+    assert account_service.gateway_auth_bypass_remaining() > 0.0
+
+
+def test_gateway_lease_is_skipped_while_bypass_is_open(monkeypatch):
+    """While the bypass window is open, selection must not lease from the gateway."""
+    _isolate(monkeypatch)
+    monkeypatch.setattr(
+        account_service,
+        "_gw_auth_cooldown_until",
+        time.monotonic() + 60,
+    )
+    monkeypatch.setattr(account_module._gw, "is_enabled", lambda: True)
+    leases: list[dict] = []
+    monkeypatch.setattr(account_module._gw, "acquire", lambda **kw: leases.append(kw) or "")
+
+    account_service._acquire_next_candidate_token(
+        deadline_monotonic=None,
+        wait=False,
+    )
+
+    assert leases == []

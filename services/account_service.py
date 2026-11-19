@@ -67,6 +67,14 @@ _MISSING = object()
 # already-expired deadline: issuing the call would guarantee an overrun.
 _MIN_SELECTION_REMOTE_TIMEOUT_SECONDS = 0.5
 
+# Batch revocation on the gateway's side makes many leased tokens worthless at
+# once. Counting auth failures in a sliding window and opening a short bypass
+# keeps each request from burning its whole attempt budget on dead leases while
+# this store's own refreshable accounts are healthy.
+_GW_AUTH_WINDOW_SECONDS = 30.0
+_GW_AUTH_BURST_THRESHOLD = 3
+_GW_AUTH_COOLDOWN_SECONDS = 120.0
+
 
 def _index_plan_key(account: dict) -> str:
     value = AccountService._normalize_account_type(account.get("type"))
@@ -341,6 +349,10 @@ class AccountService:
         # minutes is enough for the gateway's own health pass to drop it.
         self._gw_bad_tokens: dict[str, float] = {}
         self._gw_bad_lock = Lock()
+        # Sliding window of gateway auth failures plus the moment the bypass
+        # window closes. Guarded by ``_gw_bad_lock`` like the blacklist above.
+        self._gw_auth_failures: deque[float] = deque()
+        self._gw_auth_cooldown_until = 0.0
         self._by_management_id: dict[str, str] = {}
         self._token_order: list[str] = []
         self._token_holes = 0
@@ -1653,14 +1665,38 @@ class AccountService:
         in ``excluded`` on the next lease: re-leasing the same revoked credential
         only burns attempts (measured traffic showed 4 consecutive attempts on
         distinct revoked tokens).
+
+        A burst of such failures means the gateway's own pool is polluted (batch
+        revocation), not that one credential went stale. Keep leasing from it and
+        every request burns its whole attempt budget on dead tokens, while this
+        store's refreshable local accounts would have answered: measured
+        2026-11-20 02:31-02:33 showed 15/16 attempts leaking from the gateway
+        before a local account was finally used. So a burst opens a short
+        gateway bypass window in which selection goes straight to the local pool.
         """
         token = str(access_token or "").strip()
         if not token:
             return False
-        expiry = time.monotonic() + max(30.0, float(ttl_seconds))
+        now = time.monotonic()
+        expiry = now + max(30.0, float(ttl_seconds))
         with self._gw_bad_lock:
             self._gw_bad_tokens[token] = expiry
+            self._gw_auth_failures.append(now)
+            while self._gw_auth_failures and now - self._gw_auth_failures[0] > _GW_AUTH_WINDOW_SECONDS:
+                self._gw_auth_failures.popleft()
+            if len(self._gw_auth_failures) >= _GW_AUTH_BURST_THRESHOLD:
+                self._gw_auth_cooldown_until = now + _GW_AUTH_COOLDOWN_SECONDS
+                self._gw_auth_failures.clear()
+                logger.warning({
+                    "event": "gateway_auth_bypass_open",
+                    "seconds": _GW_AUTH_COOLDOWN_SECONDS,
+                })
         return True
+
+    def gateway_auth_bypass_remaining(self) -> float:
+        """Seconds left in the gateway bypass window (0 when leasing is allowed)."""
+        with self._gw_bad_lock:
+            return max(0.0, self._gw_auth_cooldown_until - time.monotonic())
 
     def gateway_bad_tokens(self) -> set[str]:
         """Tokens currently blacklisted from gateway leases (expired entries pruned)."""
@@ -2701,7 +2737,11 @@ class AccountService:
         # The gateway maintains its own in-memory index and returns in <1 ms
         # without touching the Python global lock.  On any failure (network,
         # gateway not running) we fall through to the existing local path.
-        if _gw.is_enabled():
+        # A burst of auth failures on leased tokens means the gateway's own pool
+        # is polluted (batch revocation): for a short window go straight to this
+        # store's refreshable accounts instead of burning attempts on dead leases.
+        gateway_bypass = self.gateway_auth_bypass_remaining() > 0
+        if _gw.is_enabled() and not gateway_bypass:
             remaining = (
                 float(deadline_monotonic) - time.monotonic()
                 if deadline_monotonic is not None
