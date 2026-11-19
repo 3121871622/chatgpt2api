@@ -333,6 +333,14 @@ class AccountService:
         self._persisted_accounts: dict[str, dict] = {}
         self._accounts_revision = ""
         self._selection_index = AccountSelectionIndex(classify_account_for_index)
+        # Short-TTL blacklist for gateway-leased tokens whose upstream call came
+        # back as an auth failure. The Go gateway leases from its own account
+        # database (measured 16,493 accounts vs 9,741 in this store), so those
+        # tokens are not in our store: we cannot refresh them, and re-leasing the
+        # same revoked token just burns another attempt. Excluding it for a few
+        # minutes is enough for the gateway's own health pass to drop it.
+        self._gw_bad_tokens: dict[str, float] = {}
+        self._gw_bad_lock = Lock()
         self._by_management_id: dict[str, str] = {}
         self._token_order: list[str] = []
         self._token_holes = 0
@@ -1636,6 +1644,33 @@ class AccountService:
         with self._lock:
             return self._resolve_access_token_locked(access_token)
 
+    def mark_gateway_token_bad(self, access_token: str, *, ttl_seconds: float = 600.0) -> bool:
+        """Exclude a gateway-leased token that failed upstream authentication.
+
+        Tokens leased from the Go gateway belong to its own account database, so
+        this store cannot refresh them. When upstream answers ``401
+        token_revoked`` for one of them, remember it for a few minutes and pass it
+        in ``excluded`` on the next lease: re-leasing the same revoked credential
+        only burns attempts (measured traffic showed 4 consecutive attempts on
+        distinct revoked tokens).
+        """
+        token = str(access_token or "").strip()
+        if not token:
+            return False
+        expiry = time.monotonic() + max(30.0, float(ttl_seconds))
+        with self._gw_bad_lock:
+            self._gw_bad_tokens[token] = expiry
+        return True
+
+    def gateway_bad_tokens(self) -> set[str]:
+        """Tokens currently blacklisted from gateway leases (expired entries pruned)."""
+        now = time.monotonic()
+        with self._gw_bad_lock:
+            expired = [token for token, expiry in self._gw_bad_tokens.items() if expiry <= now]
+            for token in expired:
+                self._gw_bad_tokens.pop(token, None)
+            return set(self._gw_bad_tokens)
+
     def wait_for_rotated_access_token(
         self,
         access_token: str,
@@ -2502,19 +2537,11 @@ class AccountService:
         """
         account = self.get_account(token) or {}
         if not account:
-            # A rotated credential: the index still holds the previous access
-            # token while the store already published a newer one. Resolve the
-            # alias before deciding — without this the request goes out with a
-            # token upstream has already revoked (401 token_revoked with an
-            # empty account_email, measured 09:39 burst on 1.9.32).
-            resolved = str(self.resolve_access_token(token) or "").strip()
-            if resolved and resolved != token:
-                account = self.get_account(resolved) or {}
-            if not account:
-                # Genuinely unknown to the local store: refuse it. Accepting
-                # unknown tokens made every post-restart request fail with 503
-                # (1.9.33 measured 8/8) because the store had not loaded yet.
-                return False
+            # Token is not in the local index yet (gateway lease ahead of the
+            # local snapshot).  The gateway already vetted the account as
+            # ready; trust the lease and let any dead credential surface as a
+            # normal per-attempt failure.
+            return True
         if str(account.get("last_remote_check_result") or "").strip().lower() == "invalid":
             return False
         if str(account.get("status") or "").strip() in {"禁用", "异常"}:
@@ -2690,10 +2717,12 @@ class AccountService:
                 _sources = self._index_source_filter(source_type)
                 if _sources is not None:
                     sources_list = list(_sources)
+                gw_excluded = set(excluded_tokens or ())
+                gw_excluded |= self.gateway_bad_tokens()
                 tok = _gw.acquire(
                     plans=plans_list,
                     sources=sources_list,
-                    excluded=list(excluded_tokens) if excluded_tokens else None,
+                    excluded=list(gw_excluded) if gw_excluded else None,
                     limit=max(1, int(config.image_account_concurrency or 1)),
                     timeout=gw_timeout,
                 )
