@@ -2384,11 +2384,14 @@ def _generate_single_image(
         attempt_budget = max_account_attempts
         if failure.capability == "auth":
             # Gateway-leased tokens that fail with 401 come back in ~2s and each
-            # one is a distinct credential, so give auth failures a larger budget
-            # than a slow upstream failure: finishing 4 attempts and still hitting
-            # a revoked token means the wave is wide, not that the pool is empty.
-            # Measured 10:57 failure: 4 attempts x ~2s, all 401.
-            attempt_budget = min(8, max(2, max_account_attempts) * 2)
+            # one is a distinct credential, so give auth failures a much larger
+            # budget than a slow upstream failure: a batch revocation wave makes
+            # many leases worthless at once, so a handful of samples is not
+            # enough to find a live credential. Measured 2026-11-20 02:11 and
+            # 02:15: 8 attempts x ~1.7s, all 401, while the same model completed
+            # immediately before and after, i.e. the wave was wide, not the pool
+            # empty.
+            attempt_budget = min(16, max(4, max_account_attempts) * 4)
         if (
             failure.code == "task_interrupted"
             or (
